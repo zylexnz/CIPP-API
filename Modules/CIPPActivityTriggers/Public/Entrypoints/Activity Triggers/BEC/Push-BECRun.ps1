@@ -20,39 +20,39 @@ function Push-BECRun {
         $startDate = (Get-Date).AddDays(-7).ToUniversalTime()
         $endDate = (Get-Date)
         Write-Information 'Getting audit logs'
-        $auditLog = (New-ExoRequest -tenantid $TenantFilter -cmdlet 'Get-AdminAuditLogConfig').UnifiedAuditLogIngestionEnabled
-        $7DaysLog = if ($auditLog -eq $false) {
-            $ExtractResult = 'AuditLog is disabled. Cannot perform full analysis'
-        } else {
-            $sessionid = Get-Random -Minimum 10000 -Maximum 99999
-            $operations = @(
-                'Remove-MailboxPermission',
-                'Add-MailboxPermission',
-                'UpdateCalendarDelegation',
-                'AddFolderPermissions'
-            )
-            $startDate = (Get-Date).AddDays(-7)
-            $endDate = (Get-Date)
-            $SearchParam = @{
-                SessionCommand = 'ReturnLargeSet'
-                Operations     = $operations
-                sessionid      = $sessionid
-                startDate      = $startDate
-                endDate        = $endDate
-            }
-            try {
+        try {
+            $auditLog = (New-ExoRequest -tenantid $TenantFilter -cmdlet 'Get-AdminAuditLogConfig').UnifiedAuditLogIngestionEnabled
+            $7DaysLog = if ($auditLog -eq $false) {
+                $ExtractResult = 'AuditLog is disabled. Cannot perform full analysis'
+            } else {
+                $sessionid = Get-Random -Minimum 10000 -Maximum 99999
+                $operations = @(
+                    'Remove-MailboxPermission',
+                    'Add-MailboxPermission',
+                    'UpdateCalendarDelegation',
+                    'AddFolderPermissions'
+                )
+                $startDate = (Get-Date).AddDays(-7)
+                $endDate = (Get-Date)
+                $SearchParam = @{
+                    SessionCommand = 'ReturnLargeSet'
+                    Operations     = $operations
+                    sessionid      = $sessionid
+                    startDate      = $startDate
+                    endDate        = $endDate
+                }
                 do {
-                    New-ExoRequest -tenantid $TenantFilter -cmdlet 'Search-unifiedAuditLog' -cmdParams $SearchParam -Anchor $Username
+                    $logsTenant = New-ExoRequest -tenantid $TenantFilter -cmdlet 'Search-unifiedAuditLog' -cmdParams $SearchParam -Anchor $Username
                     Write-Information "Retrieved $($logsTenant.count) logs"
                     $logsTenant
                 } while ($LogsTenant.count % 5000 -eq 0 -and $LogsTenant.count -ne 0)
                 $ExtractResult = 'Successfully extracted logs from auditlog'
-            } catch {
-                $CippAuditError = Get-CippException -Exception $_
-                Write-LogMessage -API 'BECRun' -message "Audit log search failed for $($UserName): $($CippAuditError.NormalizedError)" -tenant $TenantFilter -sev Warning -LogData $CippAuditError
-                $ExtractResult = "Audit log search failed or timed out - mailbox permission changes could not be analyzed. Error: $($CippAuditError.NormalizedError)"
-                @()
             }
+        } catch {
+            $7DaysLog = @()
+            $CippAuditError = Get-CippException -Exception $_
+            $ExtractResult = "Could not retrieve audit logs: $($CippAuditError.NormalizedError)"
+            Write-LogMessage -API 'BECRun' -message "Failed to retrieve audit logs for $($UserName): $($CippAuditError.NormalizedError)" -tenant $TenantFilter -sev Warning -LogData $CippAuditError
         }
         Write-Information 'Getting last sign-in'
         try {
