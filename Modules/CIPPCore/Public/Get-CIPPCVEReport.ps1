@@ -84,9 +84,12 @@ function Get-CIPPCVEReport {
                     softwareName               = $Item.softwareName
                     softwareVendor             = $Item.softwareVendor
                     softwareVersion            = $Item.softwareVersion
+                    lastUpdated                = $Item.lastUpdated
                     TotalDeviceCount           = 0
                     AffectedTenantsList        = [System.Collections.Generic.List[object]]::new()
                     AffectedDevicesList        = [System.Collections.Generic.List[object]]::new()
+                    DiskPathList               = [System.Collections.Generic.List[object]]::new()
+                    RegistryPathList           = [System.Collections.Generic.List[object]]::new()
                     ExceptionMatchCount        = 0
                     TotalTenantGroupCount      = 0
                     ExceptionSources           = [System.Collections.Generic.HashSet[string]]::new()
@@ -102,9 +105,13 @@ function Get-CIPPCVEReport {
             if ($Item.deviceDetailsJson) {
                 $Devices = ConvertFrom-Json $Item.deviceDetailsJson | Sort-Object -Property deviceName -Unique
                 foreach ($Dev in $Devices) {
-                    [void]$CveGroup.AffectedDevicesList.Add(@{ deviceName = $Dev.deviceName })
-                    $CveGroup.TotalDeviceCount ++
-                    }
+                        [void]$CveGroup.AffectedDevicesList.Add(@{ deviceName    = $Dev.deviceName })
+                        if($Dev.registryPaths){[void]$CveGroup.RegistryPathList.Add(@{ deviceName = $Dev.deviceName
+                                                                                       registryPaths = $Dev.registryPaths })}
+                        if($Dev.diskPaths){[void]$CveGroup.DiskPathList.Add(@{ deviceName = $Dev.deviceName
+                                                                               diskPaths = $Dev.diskPaths })}
+                        $CveGroup.TotalDeviceCount ++
+                }
             }
         }
 
@@ -116,11 +123,34 @@ function Get-CIPPCVEReport {
             $ExceptionStatus = 'None'
             $HasException = $false
             $Exceptions = @{}
+            $ExceptionType = ''
+            $ExceptionComment = ''
+            $ExceptionCreatedBy = ''
+            $ExceptionDate = ''
+            $ExceptionExpiry = ''
 
             if ($ExceptionsByCve.ContainsKey($CveKey)){
                 $Exceptions         = @($ExceptionsByCve[$CveKey])
                 $HasException       = $true
                 $ExceptionStatus    = if ($Exceptions.customerId -contains "ALL") { "All" } else { "Partial" }
+            }
+            
+            if ($HasException){
+                $ExceptionType = $Exceptions | ForEach-Object {
+                                                    @{ customerId = $Exceptions.customerId
+                                                    exceptionType = $Exceptions.exceptionType }}
+                $ExceptionComment = $Exceptions | ForEach-Object {
+                                                    @{ customerId = $_.customerId
+                                                    exceptionComment = $_.exceptionComment } }
+                $ExceptionCreatedBy = $Exceptions | ForEach-Object {
+                                                    @{ customerId = $_.customerId
+                                                    exceptionCreatedBy = $_.exceptionCreatedBy } }
+                $ExceptionDate = $Exceptions | ForEach-Object {
+                                                    @{ customerId = $_.customerId
+                                                    exceptionDate = $_.exceptionDate } }
+                $ExceptionExpiry = $Exceptions | ForEach-Object {
+                                                    @{ customerId = $_.customerId
+                                                    exceptionExpiry = $_.exceptionExpiry } }
             }
 
             [void]$SortedCves.Add([PSCustomObject]@{
@@ -132,25 +162,17 @@ function Get-CIPPCVEReport {
                 softwareVersion            = $Target.softwareVersion
                 deviceCount                = $Target.TotalDeviceCount
                 tenantCount                = $Target.TotalTenantGroupCount
+                registryPaths              = $Target.RegistryPathList
+                diskPaths                  = $Target.DiskPathList
                 exceptionStatus            = $ExceptionStatus
                 hasException               = $HasException
                 affectedTenants            = $Target.AffectedTenantsList
                 affectedDevices            = $Target.AffectedDevicesList
-                exceptionType              = if ($HasException){$Exceptions | ForEach-Object {
-                                                    @{ customerId = $_.customerId
-                                                    exceptionType = $_.exceptionType } } }else{''}
-                exceptionComment           = if ($HasException){$Exceptions | ForEach-Object {
-                                                    @{ customerId = $_.customerId
-                                                    exceptionComment = $_.exceptionComment } } }else{''}
-                exceptionCreatedBy         = if ($HasException){$Exceptions | ForEach-Object {
-                                                    @{ customerId = $_.customerId
-                                                    exceptionCreatedBy = $_.exceptionCreatedBy } } }else{''}
-                exceptionDate              = if ($HasException){$Exceptions | ForEach-Object {
-                                                    @{ customerId = $_.customerId
-                                                    exceptionDate = $_.exceptionDate } } }else{''}
-                exceptionExpiry            = if ($HasException){$Exceptions | ForEach-Object {
-                                                    @{ customerId = $_.customerId
-                                                    exceptionExpiry = $_.exceptionExpiry } } }else{''}
+                exceptionType              = $ExceptionType
+                exceptionComment           = $ExceptionComment
+                exceptionCreatedBy         = $ExceptionCreatedBy
+                exceptionDate              = $ExceptionDate
+                exceptionExpiry            = $ExceptionExpiry
                 cacheTimeStamp             = $Target.lastUpdated
             })
         }
