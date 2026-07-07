@@ -64,15 +64,16 @@ function Invoke-ListShadowAI {
         $DeviceCount = [int]($App.deviceCount ?? 0)
         if ($DeviceCount -eq 0 -and $App.managedDevices) { $DeviceCount = @($App.managedDevices).Count }
         $DetectedApps.Add([PSCustomObject]@{
-                application = $App.displayName
-                aiTool      = $Match.name
-                vendor      = $Match.vendor
-                category    = $Match.category
-                risk        = $Match.risk
-                publisher   = $App.publisher
-                version     = $App.version
-                platform    = if ([string]::IsNullOrWhiteSpace($App.platform)) { 'Unknown' } else { $App.platform }
-                deviceCount = $DeviceCount
+                application    = $App.displayName
+                aiTool         = $Match.name
+                vendor         = $Match.vendor
+                category       = $Match.category
+                risk           = $Match.risk
+                publisher      = $App.publisher
+                version        = $App.version
+                platform       = if ([string]::IsNullOrWhiteSpace($App.platform)) { 'Unknown' } else { $App.platform }
+                deviceCount    = $DeviceCount
+                managedDevices = @($App.managedDevices ?? @())
             })
     }
 
