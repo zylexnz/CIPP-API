@@ -32,8 +32,7 @@ function Update-CIPPSSORedirectUri {
             $SSOMultiTenant = $Secret.SSOMultiTenant -eq 'True'
         } catch { }
     } else {
-        $KV = $env:WEBSITE_DEPLOYMENT_ID
-        $VaultName = if ($KV) { ($KV -split '-')[0] } else { $null }
+        $VaultName = Get-CippKeyVaultName
         if ($VaultName) {
             try {
                 $SSOAppId = Get-CippKeyVaultSecret -VaultName $VaultName -Name 'SSOAppId' -AsPlainText -ErrorAction Stop

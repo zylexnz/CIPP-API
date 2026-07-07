@@ -82,7 +82,7 @@ function Get-GraphToken($tenantid, $scope, $AsApp, $AppID, $AppSecret, $refreshT
                     }
                 } else {
                     # Production environment - get from Key Vault
-                    $keyvaultname = ($env:WEBSITE_DEPLOYMENT_ID -split '-')[0]
+                    $keyvaultname = Get-CippKeyVaultName
                     $secret = Get-CippKeyVaultSecret -VaultName $keyvaultname -Name $clientType.customerId -AsPlainText -ErrorAction Stop
                     if ($secret) {
                         Set-Item -Path "env:\$($clientType.customerId)" -Value $secret -Force

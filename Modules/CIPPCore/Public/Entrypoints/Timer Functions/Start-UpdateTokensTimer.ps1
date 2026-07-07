@@ -23,7 +23,7 @@ function Start-UpdateTokensTimer {
                     Write-LogMessage -API 'Update Tokens' -message 'Could not update refresh token. Will try again in 7 days.' -sev 'CRITICAL'
                 }
             } else {
-                $KV = ($env:WEBSITE_DEPLOYMENT_ID -split '-')[0]
+                $KV = Get-CippKeyVaultName
                 if ($Refreshtoken) {
                     Set-CippKeyVaultSecret -VaultName $KV -Name 'RefreshToken' -SecretValue (ConvertTo-SecureString -String $Refreshtoken -AsPlainText -Force)
                 } else {
