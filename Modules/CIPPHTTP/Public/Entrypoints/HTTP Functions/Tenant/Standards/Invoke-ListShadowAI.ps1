@@ -77,17 +77,20 @@ function Invoke-ListShadowAI {
         if ($DeviceCount -eq 0 -and $App.managedDevices) { $DeviceCount = @($App.managedDevices).Count }
         $IsSanctioned = $SanctionedTools.ContainsKey($Match.name.ToLower())
         $DetectedApps.Add([PSCustomObject]@{
-                application    = $App.displayName
-                aiTool         = $Match.name
-                vendor         = $Match.vendor
-                category       = $Match.category
-                risk           = if ($IsSanctioned) { 'Informational' } else { $Match.risk }
-                status         = if ($IsSanctioned) { 'Sanctioned' } else { 'Unsanctioned' }
-                publisher      = $App.publisher
-                version        = $App.version
-                platform       = if ([string]::IsNullOrWhiteSpace($App.platform)) { 'Unknown' } else { $App.platform }
-                deviceCount    = $DeviceCount
-                managedDevices = @($App.managedDevices ?? @())
+                application     = $App.displayName
+                aiTool          = $Match.name
+                vendor          = $Match.vendor
+                category        = $Match.category
+                risk            = if ($IsSanctioned) { 'Informational' } else { $Match.risk }
+                catalogRisk     = $Match.risk
+                status          = if ($IsSanctioned) { 'Sanctioned' } else { 'Unsanctioned' }
+                toolDescription = $Match.description
+                riskReason      = $Match.riskReason
+                publisher       = $App.publisher
+                version         = $App.version
+                platform        = if ([string]::IsNullOrWhiteSpace($App.platform)) { 'Unknown' } else { $App.platform }
+                deviceCount     = $DeviceCount
+                managedDevices  = @($App.managedDevices ?? @())
             })
     }
 
@@ -123,7 +126,10 @@ function Invoke-ListShadowAI {
             vendor                 = $Match.vendor
             category               = $Match.category
             risk                   = if ($IsSanctioned) { 'Informational' } else { $Match.risk }
+            catalogRisk            = $Match.risk
             status                 = if ($IsSanctioned) { 'Sanctioned' } else { 'Unsanctioned' }
+            toolDescription        = $Match.description
+            riskReason             = $Match.riskReason
             applicationId          = $Sp.appId
             approvedPermissions    = @($Permissions)
             firstConsentedDateTime = $Sp.createdDateTime
