@@ -37,6 +37,18 @@ function Invoke-ListShadowAI {
         return $null
     }
 
+    $SanctionedTools = @{}
+    try {
+        $SanctionTable = Get-CIPPTable -TableName 'ShadowAIConfig'
+        $EscapedTenant = $TenantFilter -replace "'", "''"
+        foreach ($Row in @(Get-CIPPAzDataTableEntity @SanctionTable -Filter "PartitionKey eq '$EscapedTenant'")) {
+            $ToolName = if ($Row.Tool) { $Row.Tool } else { $Row.RowKey }
+            if ($ToolName) { $SanctionedTools[$ToolName.ToLower()] = $true }
+        }
+    } catch {
+        Write-LogMessage -API 'ShadowAI' -tenant $TenantFilter -message "Could not load sanctioned AI tools: $($_.Exception.Message)" -Sev 'Warning'
+    }
+
     # --- Cached datasets from the CIPP reporting database (no live Graph enumeration) ---
     $CacheTypes = @('DetectedApps', 'ServicePrincipals', 'OAuth2PermissionGrants')
     $CacheData = @{}
@@ -63,12 +75,14 @@ function Invoke-ListShadowAI {
         if (-not $Match) { continue }
         $DeviceCount = [int]($App.deviceCount ?? 0)
         if ($DeviceCount -eq 0 -and $App.managedDevices) { $DeviceCount = @($App.managedDevices).Count }
+        $IsSanctioned = $SanctionedTools.ContainsKey($Match.name.ToLower())
         $DetectedApps.Add([PSCustomObject]@{
                 application    = $App.displayName
                 aiTool         = $Match.name
                 vendor         = $Match.vendor
                 category       = $Match.category
-                risk           = $Match.risk
+                risk           = if ($IsSanctioned) { 'Informational' } else { $Match.risk }
+                status         = if ($IsSanctioned) { 'Sanctioned' } else { 'Unsanctioned' }
                 publisher      = $App.publisher
                 version        = $App.version
                 platform       = if ([string]::IsNullOrWhiteSpace($App.platform)) { 'Unknown' } else { $App.platform }
@@ -102,12 +116,14 @@ function Invoke-ListShadowAI {
         } else {
             @()
         }
+        $IsSanctioned = $SanctionedTools.ContainsKey($Match.name.ToLower())
         $Consent = [PSCustomObject]@{
             application            = $Sp.displayName
             aiTool                 = $Match.name
             vendor                 = $Match.vendor
             category               = $Match.category
-            risk                   = $Match.risk
+            risk                   = if ($IsSanctioned) { 'Informational' } else { $Match.risk }
+            status                 = if ($IsSanctioned) { 'Sanctioned' } else { 'Unsanctioned' }
             applicationId          = $Sp.appId
             approvedPermissions    = @($Permissions)
             firstConsentedDateTime = $Sp.createdDateTime
@@ -153,13 +169,13 @@ function Invoke-ListShadowAI {
     $ToolMap = @{}
     foreach ($App in $DetectedApps) {
         if (-not $ToolMap.ContainsKey($App.aiTool)) {
-            $ToolMap[$App.aiTool] = [PSCustomObject]@{ Tool = $App.aiTool; Category = $App.category; Risk = $App.risk; Devices = 0; Users = 0 }
+            $ToolMap[$App.aiTool] = [PSCustomObject]@{ Tool = $App.aiTool; Category = $App.category; Risk = $App.risk; Status = $App.status; Devices = 0; Users = 0 }
         }
         $ToolMap[$App.aiTool].Devices += $App.deviceCount
     }
     foreach ($App in $ConsentedApps) {
         if (-not $ToolMap.ContainsKey($App.aiTool)) {
-            $ToolMap[$App.aiTool] = [PSCustomObject]@{ Tool = $App.aiTool; Category = $App.category; Risk = $App.risk; Devices = 0; Users = 0 }
+            $ToolMap[$App.aiTool] = [PSCustomObject]@{ Tool = $App.aiTool; Category = $App.category; Risk = $App.risk; Status = $App.status; Devices = 0; Users = 0 }
         }
         $ToolMap[$App.aiTool].Users += [int]$App.activeUsersLast7Days
     }
@@ -185,6 +201,7 @@ function Invoke-ListShadowAI {
             users     = $_.Users
             footprint = $_.Devices + $_.Users
             category  = $_.Category
+            status    = $_.Status
         }
     }
 
@@ -194,6 +211,7 @@ function Invoke-ListShadowAI {
             deviceInstalls  = [int](($DetectedApps | Measure-Object -Property deviceCount -Sum).Sum)
             consentedAiApps = $ConsentedApps.Count
             highRiskTools   = @($ToolMap.Values | Where-Object { $_.Risk -eq 'High' }).Count
+            sanctionedTools = @($ToolMap.Values | Where-Object { $_.Status -eq 'Sanctioned' }).Count
             intuneSynced    = $IntuneSynced
             entraSynced     = $EntraSynced
             lastDataRefresh = $LastDataRefresh
