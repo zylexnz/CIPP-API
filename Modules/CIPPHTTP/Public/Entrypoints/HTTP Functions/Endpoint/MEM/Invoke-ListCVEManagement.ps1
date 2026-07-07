@@ -126,24 +126,16 @@ function Invoke-ListCVEManagement {
                     $Exceptions         = @($ExceptionsByCve[$CveKey])
                     $HasException       = $true
                     $ExceptionStatus    = if ($Exceptions.customerId -contains "ALL") { "All" } else { "Partial" }
-                }
-
-                if ($HasException){
-                $ExceptionType = $Exceptions | ForEach-Object {
-                                                    @{ customerId = $Exceptions.customerId
-                                                    exceptionType = $Exceptions.exceptionType }}
-                $ExceptionComment = $Exceptions | ForEach-Object {
-                                                    @{ customerId = $_.customerId
-                                                    exceptionComment = $_.exceptionComment } }
-                $ExceptionCreatedBy = $Exceptions | ForEach-Object {
-                                                    @{ customerId = $_.customerId
-                                                    exceptionCreatedBy = $_.exceptionCreatedBy } }
-                $ExceptionDate = $Exceptions | ForEach-Object {
-                                                    @{ customerId = $_.customerId
-                                                    exceptionDate = $_.exceptionDate } }
-                $ExceptionExpiry = $Exceptions | ForEach-Object {
-                                                    @{ customerId = $_.customerId
-                                                    exceptionExpiry = $_.exceptionExpiry } }
+                    $ExceptionType      = @{ customerId = $Exceptions.customerId
+                                            exceptionType = $Exceptions.exceptionType }
+                    $ExceptionComment   = @{ customerId = $Exceptions.customerId
+                                            exceptionComment = $Exceptions.exceptionComment }
+                    $ExceptionCreatedBy = @{ customerId = $Exceptions.customerId
+                                            exceptionCreatedBy = $Exceptions.exceptionCreatedBy }
+                    $ExceptionDate      = @{ customerId = $Exceptions.customerId
+                                            exceptionDate = $Exceptions.exceptionDate }
+                    $ExceptionExpiry    = @{ customerId = $Exceptions.customerId
+                                            exceptionExpiry = $Exceptions.exceptionExpiry }
                 }
 
                 [void]$SortedCves.Add([PSCustomObject]@{
