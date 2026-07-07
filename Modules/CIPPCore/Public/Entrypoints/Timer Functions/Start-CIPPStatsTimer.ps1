@@ -85,7 +85,6 @@ function Start-CIPPStatsTimer {
             GitHub                 = $RawExt.GitHub.Enabled
             BestPracticeAnalyser   = $FeatureFlags.BestPracticeAnalyser
             SuperAdminNG           = $FeatureFlags.SuperAdminNG
-            CopilotAI              = $FeatureFlags.CopilotAI
             MCPServer              = $FeatureFlags.MCPServer
         } | ConvertTo-Json
 
