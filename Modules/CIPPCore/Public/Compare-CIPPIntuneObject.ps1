@@ -450,7 +450,7 @@ function Compare-CIPPIntuneObject {
                                 }
                                 $values.Add($displayValue)
                             }
-                            $childValue = $values -join ', '
+                            $childValue = ($values | Sort-Object) -join ', '
 
                             $results.Add([PSCustomObject]@{
                                     Key    = "GroupChild-$($child.settingDefinitionId)"
@@ -466,7 +466,7 @@ function Compare-CIPPIntuneObject {
                             foreach ($simpleValue in $child.simpleSettingCollectionValue) {
                                 $values.Add($simpleValue.value)
                             }
-                            $childValue = $values -join ', '
+                            $childValue = ($values | Sort-Object) -join ', '
 
                             $results.Add([PSCustomObject]@{
                                     Key    = "GroupChild-$($child.settingDefinitionId)"
@@ -767,7 +767,9 @@ function Compare-CIPPIntuneObject {
                 $key
             }
 
-            if ($refRawValue -ne $diffRawValue -or $null -eq $refRawValue -or $null -eq $diffRawValue) {
+            # Flag when values differ or the setting exists on only one side; a setting present on both sides with equal (even null) values is compliant
+            $presenceMismatch = ($null -eq $refItem) -xor ($null -eq $diffItem)
+            if ($refRawValue -ne $diffRawValue -or $presenceMismatch) {
                 $result.Add([PSCustomObject]@{
                         Property      = $label
                         ExpectedValue = $refValue
