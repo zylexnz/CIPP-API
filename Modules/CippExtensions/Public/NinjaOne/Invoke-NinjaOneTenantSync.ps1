@@ -2197,70 +2197,68 @@ function Invoke-NinjaOneTenantSync {
                     $DeviceIdHeader      = $ResolvedScanGroup.deviceIdHeader
                     $CveIdHeader         = $ResolvedScanGroup.cveIdHeader
 
-                    if ([string]::IsNullOrWhiteSpace($DeviceIdHeader) -or [string]::IsNullOrWhiteSpace($CveIdHeader)) {
-                        Write-LogMessage -API 'NinjaOneSync' -tenant $TenantFilter -message "CVE sync skipped — scan group missing required header config" -sev 'Warning'
+                    $RawVulns = Get-CIPPDbItem -TenantFilter $TenantFilter -Type 'DefenderCVEs' | Where-Object { $_.RowKey -ne 'DefenderCVEs-Count' }
+                    $AllVulns = $RawVulns.Data | ConvertFrom-Json
+                    $CsvRows  = [System.Collections.Generic.List[object]]::new()
+
+                    if (-not $AllVulns) {
+                        Write-LogMessage -API 'NinjaOneSync' -tenant $TenantFilter -message 'CVE sync — no vulnerability data returned' -sev 'Warning'
+                        [void]$CsvRows.Add([PSCustomObject]@{
+                                    $DeviceIdHeader = ""
+                                    $CveIdHeader    = ""})
                     } else {
-                        $RawVulns = Get-CIPPDbItem -TenantFilter $TenantFilter -Type 'DefenderCVEs' | Where-Object { $_.RowKey -ne 'DefenderCVEs-Count' }
-                        $AllVulns = $RawVulns.Data | ConvertFrom-Json
+                        $ExceptionsTable      = Get-CIPPTable -TableName 'CveExceptions'
+                        $AllExceptions        = Get-CIPPAzDataTableEntity @ExceptionsTable
+                        $ApplicableExceptions = $AllExceptions | Where-Object { $_.RowKey -eq $TenantFilter -or $_.RowKey -eq 'ALL' }
 
-                        if (-not $AllVulns) {
-                            Write-LogMessage -API 'NinjaOneSync' -tenant $TenantFilter -message 'CVE sync — no vulnerability data returned' -sev 'Warning'
-                        } else {
-                            $ExceptionsTable      = Get-CIPPTable -TableName 'CveExceptions'
-                            $AllExceptions        = Get-CIPPAzDataTableEntity @ExceptionsTable
-                            $ApplicableExceptions = $AllExceptions | Where-Object { $_.RowKey -eq $TenantFilter -or $_.RowKey -eq 'ALL' }
+                        if ($ApplicableExceptions) {
+                            $ExceptedCveIds = $ApplicableExceptions | Select-Object -ExpandProperty cveId -Unique
+                            $BeforeCount    = $AllVulns.Count
+                            $AllVulns       = $AllVulns | Where-Object { $_.cveId -notin $ExceptedCveIds }
+                            Write-LogMessage -API 'NinjaOneSync' -tenant $TenantFilter -message "CVE sync — filtered $($BeforeCount - $AllVulns.Count) excepted CVEs, $($AllVulns.Count) remaining" -sev 'Info'
+                        }
 
-                            if ($ApplicableExceptions) {
-                                $ExceptedCveIds = $ApplicableExceptions | Select-Object -ExpandProperty cveId -Unique
-                                $BeforeCount    = $AllVulns.Count
-                                $AllVulns       = $AllVulns | Where-Object { $_.cveId -notin $ExceptedCveIds }
-                                Write-LogMessage -API 'NinjaOneSync' -tenant $TenantFilter -message "CVE sync — filtered $($BeforeCount - $AllVulns.Count) excepted CVEs, $($AllVulns.Count) remaining" -sev 'Info'
+                        $SkippedCount = 0
+
+                        foreach ($Item in $AllVulns) {
+                            if ([string]::IsNullOrWhiteSpace($Item.cveId)) {
+                                $SkippedCount++
+                                continue
                             }
-
-                            $CsvRows      = [System.Collections.Generic.List[object]]::new()
-                            $SkippedCount = 0
-
-                            foreach ($Item in $AllVulns) {
-                                if ([string]::IsNullOrWhiteSpace($Item.cveId)) {
-                                    $SkippedCount++
-                                    continue
+                            if ($Item.deviceDetailsJson) {
+                                $Devices = ConvertFrom-Json $Item.deviceDetailsJson | Sort-Object -Property deviceName -Unique
+                                foreach ($Dev in $Devices) {
+                                    [void]$CsvRows.Add([PSCustomObject]@{
+                                    $DeviceIdHeader = $Dev.deviceName.Trim()
+                                    $CveIdHeader    = $Item.cveId.Trim()
+                                    })
                                 }
-                                if ($Item.deviceDetailsJson) {
-                                    $Devices = ConvertFrom-Json $Item.deviceDetailsJson | Sort-Object -Property deviceName -Unique
-                                    foreach ($Dev in $Devices) {
-                                        [void]$CsvRows.Add([PSCustomObject]@{
-                                        $DeviceIdHeader = $Dev.deviceName.Trim()
-                                        $CveIdHeader    = $Item.cveId.Trim()
-                                        })
-                                    }
-                                }
-                            }
-
-                            if ($SkippedCount -gt 0) {
-                                Write-LogMessage -API 'NinjaOneSync' -tenant $TenantFilter -message "CVE sync — skipped $SkippedCount rows (missing deviceName or cveId)" -sev 'Warning'
-                            }
-
-                            $CsvBytes = New-VulnCsvBytes -Rows $CsvRows -Headers @($DeviceIdHeader, $CveIdHeader)
-
-                            if ($CsvBytes -and $CsvBytes.Length -gt 0) {
-                                $UploadUri = "$NinjaBaseUrl/vulnerability/scan-groups/$ResolvedScanGroupId/upload"
-                                $PollUri   = "$NinjaBaseUrl/vulnerability/scan-groups/$ResolvedScanGroupId"
-                                $CveResp   = Invoke-NinjaOneVulnCsvUpload -Uri $UploadUri -PollUri $PollUri -CsvBytes $CsvBytes -Headers @{ Authorization = "Bearer $($Token.access_token)" }
-
-                                $FinalStatus    = $CveResp.status ?? 'unknown'
-                                $ProcessedCount = $CveResp.recordsProcessed ?? '?'
-
-                                if ($FinalStatus -eq 'COMPLETE') {
-                                    Write-LogMessage -API 'NinjaOneSync' -tenant $TenantFilter -message "CVE sync complete — $($CsvRows.Count) CVEs sent to '$ScanGroupName', $ProcessedCount processed" -sev 'Info'
-                                } elseif ($FinalStatus -eq 'IN_PROGRESS') {
-                                    Write-LogMessage -API 'NinjaOneSync' -tenant $TenantFilter -message "CVE sync upload accepted — $($CsvRows.Count) CVEs sent to '$ScanGroupName', still processing (timed out polling)" -sev 'Warning'
-                                } else {
-                                    Write-LogMessage -API 'NinjaOneSync' -tenant $TenantFilter -message "CVE sync finished with status '$FinalStatus' for '$ScanGroupName', $ProcessedCount processed" -sev 'Warning'
-                                }
-                            } else {
-                                Write-LogMessage -API 'NinjaOneSync' -tenant $TenantFilter -message 'CVE sync — failed to generate CSV bytes' -sev 'Warning'
                             }
                         }
+
+                        if ($SkippedCount -gt 0) {
+                            Write-LogMessage -API 'NinjaOneSync' -tenant $TenantFilter -message "CVE sync — skipped $SkippedCount rows (missing deviceName or cveId)" -sev 'Warning'
+                        }
+                    }
+                    $CsvBytes = New-VulnCsvBytes -TenantFilter $TenantFilter -Rows $CsvRows -Headers @($DeviceIdHeader, $CveIdHeader)
+
+                    if ($CsvBytes -and $CsvBytes.Length -gt 0) {
+                        $UploadUri = "$NinjaBaseUrl/vulnerability/scan-groups/$ResolvedScanGroupId/upload"
+                        $PollUri   = "$NinjaBaseUrl/vulnerability/scan-groups/$ResolvedScanGroupId"
+                        $CveResp   = Invoke-NinjaOneVulnCsvUpload -Uri $UploadUri -PollUri $PollUri -CsvBytes $CsvBytes -Headers @{ Authorization = "Bearer $($Token.access_token)" }
+
+                        $FinalStatus    = $CveResp.status ?? 'unknown'
+                        $ProcessedCount = $CveResp.recordsProcessed ?? '?'
+
+                        if ($FinalStatus -eq 'COMPLETE') {
+                            Write-LogMessage -API 'NinjaOneSync' -tenant $TenantFilter -message "CVE sync complete — $($CsvRows.Count) CVEs sent to '$ScanGroupName', $ProcessedCount processed" -sev 'Info'
+                        } elseif ($FinalStatus -eq 'IN_PROGRESS') {
+                            Write-LogMessage -API 'NinjaOneSync' -tenant $TenantFilter -message "CVE sync upload accepted — $($CsvRows.Count) CVEs sent to '$ScanGroupName', still processing (timed out polling)" -sev 'Warning'
+                        } else {
+                            Write-LogMessage -API 'NinjaOneSync' -tenant $TenantFilter -message "CVE sync finished with status '$FinalStatus' for '$ScanGroupName', $ProcessedCount processed" -sev 'Warning'
+                        }
+                    } else {
+                        Write-LogMessage -API 'NinjaOneSync' -tenant $TenantFilter -message 'CVE sync — failed to generate CSV bytes' -sev 'Warning'
                     }
                 }
             } catch {
