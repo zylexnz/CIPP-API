@@ -71,5 +71,35 @@
       "/cipp/advanced/diagnostics"
     ],
     "Hidden": true
+  },
+  {
+    "Id": "BackendSettings",
+    "Name": "Backend Settings",
+    "Description": "Backend settings page showing Azure resource URLs. Hidden on hosted instances.",
+    "Enabled": true,
+    "AllowUserToggle": false,
+    "Timers": [],
+    "Endpoints": [
+      "ExecBackendURLs"
+    ],
+    "Pages": [
+      "/cipp/settings/backend"
+    ],
+    "Hidden": true
+  },
+  {
+    "Id": "FunctionOffloading",
+    "Name": "Function Offloading",
+    "Description": "Function offloading configuration page. Hidden in CIPP-NG.",
+    "Enabled": true,
+    "AllowUserToggle": false,
+    "Timers": [],
+    "Endpoints": [
+      "ExecOffloadFunctions"
+    ],
+    "Pages": [
+      "/cipp/advanced/super-admin/function-offloading"
+    ],
+    "Hidden": true
   }
 ]
