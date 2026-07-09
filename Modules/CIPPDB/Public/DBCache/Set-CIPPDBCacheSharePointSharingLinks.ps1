@@ -42,6 +42,26 @@ function Set-CIPPDBCacheSharePointSharingLinks {
         $Identity.user.email ?? $Identity.user.userPrincipalName ?? $Identity.siteUser.email ?? $Identity.user.displayName ?? $Identity.siteUser.displayName ?? $Identity.group.email ?? $Identity.group.displayName ?? $Identity.siteGroup.displayName
     }
 
+    # Flatten a shared driveItem to only the scalars we need downstream. Keeping full Graph
+    # Site/Drive/Item objects in $SharedItems across the whole tenant is a major memory sink.
+    function New-CIPPLeanSharedItem {
+        param($Item, $Site, $Drive)
+        [PSCustomObject]@{
+            SiteId         = $Site.id
+            SiteName       = $Site.displayName ?? $Site.name
+            SiteUrl        = $Site.webUrl
+            IsPersonalSite = [bool]$Site.isPersonalSite
+            DriveId        = $Drive.id
+            DriveName      = $Drive.name
+            ItemId         = $Item.id
+            FileName       = $Item.name
+            ItemUrl        = $Item.webUrl
+            IsFolder       = [bool]$Item.folder
+            Size           = $Item.size
+            LastModified   = $Item.lastModifiedDateTime
+        }
+    }
+
     $StartTime = Get-Date
     Write-Host "[SharingLinks][$TenantFilter] START at $($StartTime.ToString('o'))"
     try {
@@ -103,13 +123,16 @@ function Set-CIPPDBCacheSharePointSharingLinks {
         Write-Host "[SharingLinks][$TenantFilter] Phase 2 (site drives): $($DriveEntries.Count) drives, $FailedDriveLookups site drive lookups failed (+$([math]::Round(((Get-Date) - $StartTime).TotalSeconds,1))s)"
 
         # 3) Delta-scan every drive and keep items that carry the "shared" facet.
-        #    Enumerating every driveItem across hundreds of drives in a single bulk call buffers
-        #    the whole tenant's file tree in memory and OOMs the worker on large tenants. Scan a
-        #    small number of drives per bulk call instead, extract only shared items, and release
-        #    the raw item pages between batches to keep peak memory bounded.
+        #    A bulk delta over many drives auto-follows every drive's nextLinks and buffers the
+        #    whole file tree in memory, OOM-killing the worker on tenants with huge libraries.
+        #    Strategy: bulk only the FIRST delta page per drive (fast + parallel for the common
+        #    case that fits in one page) via -NoPaginateIds, then stream any large drive's
+        #    remaining pages one page at a time, discarding non-shared items as they flow. Only
+        #    lean scalar objects are retained.
         $DeltaBatchSize = 20
         $SharedItems = [System.Collections.Generic.List[object]]::new()
         $FailedDrives = 0
+        $LargeDrives = 0
         $DriveTotal = $DriveEntries.Count
         Write-Host "[SharingLinks][$TenantFilter] Phase 3 (delta scan): scanning $DriveTotal drives for shared items in batches of $DeltaBatchSize"
         for ($Offset = 0; $Offset -lt $DriveTotal; $Offset += $DeltaBatchSize) {
@@ -127,9 +150,11 @@ function Set-CIPPDBCacheSharePointSharingLinks {
             }
 
             try {
-                $DeltaResponses = New-GraphBulkRequest -tenantid $TenantFilter -Requests @($DeltaRequests) -asapp $true
+                # -NoPaginateIds with every id => bulk returns only each drive's first page and
+                # leaves its @odata.nextLink intact instead of buffering all continuations.
+                $DeltaResponses = New-GraphBulkRequest -tenantid $TenantFilter -Requests @($DeltaRequests) -asapp $true -NoPaginateIds @($DeltaRequests.id)
             } catch {
-                # A whole-batch failure (throttle/OOM/token) loses only this batch's drives, not the run.
+                # A whole-batch failure (throttle/token) loses only this batch's drives, not the run.
                 $FailedDrives += @($BatchEntries).Count
                 Write-Host "[SharingLinks][$TenantFilter] Phase 3: batch at offset $Offset ($(@($BatchEntries).Count) drives) BULK FAILED: $($_.Exception.Message)"
                 $DeltaResponses = $null
@@ -145,9 +170,27 @@ function Set-CIPPDBCacheSharePointSharingLinks {
                     continue
                 }
                 $Entry = $DriveByRequestId["$($Response.id)"]
+                $Site = $Entry.Site
+                $Drive = $Entry.Drive
+
+                # First page (already fetched in bulk).
                 foreach ($Item in @($Response.body.value)) {
                     if ($Item.shared -and -not $Item.deleted) {
-                        $SharedItems.Add([PSCustomObject]@{ Site = $Entry.Site; Drive = $Entry.Drive; Item = $Item })
+                        $SharedItems.Add((New-CIPPLeanSharedItem -Item $Item -Site $Site -Drive $Drive))
+                    }
+                }
+
+                # Large drive: stream the remaining pages one at a time to bound memory.
+                $NextLink = $Response.body.'@odata.nextLink'
+                if ($NextLink) {
+                    $LargeDrives++
+                    try {
+                        New-GraphGetRequest -uri $NextLink -tenantid $TenantFilter -asapp $true -Stream |
+                            Where-Object { $_.shared -and -not $_.deleted } |
+                            ForEach-Object { $SharedItems.Add((New-CIPPLeanSharedItem -Item $_ -Site $Site -Drive $Drive)) }
+                    } catch {
+                        $FailedDrives++
+                        Write-Host "[SharingLinks][$TenantFilter] Phase 3: streaming remaining pages FAILED for '$($Site.webUrl)' / '$($Drive.name)': $($_.Exception.Message)"
                     }
                 }
             }
@@ -155,13 +198,13 @@ function Set-CIPPDBCacheSharePointSharingLinks {
             # Release this batch's raw item pages before the next batch.
             $DeltaResponses = $null
             [System.GC]::Collect()
-            Write-Host "[SharingLinks][$TenantFilter] Phase 3: processed $([Math]::Min($Offset + $DeltaBatchSize, $DriveTotal))/$DriveTotal drives, $($SharedItems.Count) shared so far (+$([math]::Round(((Get-Date) - $StartTime).TotalSeconds,1))s)"
+            Write-Host "[SharingLinks][$TenantFilter] Phase 3: processed $([Math]::Min($Offset + $DeltaBatchSize, $DriveTotal))/$DriveTotal drives, $($SharedItems.Count) shared so far, $LargeDrives large drives streamed (+$([math]::Round(((Get-Date) - $StartTime).TotalSeconds,1))s)"
         }
         # If every drive failed, don't proceed to overwrite good cached data with an empty set.
         if ($DriveTotal -gt 0 -and $FailedDrives -ge $DriveTotal) {
             throw "All $DriveTotal drive delta scans failed - aborting to preserve existing cache."
         }
-        Write-Host "[SharingLinks][$TenantFilter] Phase 3 (delta scan): $($SharedItems.Count) shared items, $FailedDrives drive scans failed (+$([math]::Round(((Get-Date) - $StartTime).TotalSeconds,1))s)"
+        Write-Host "[SharingLinks][$TenantFilter] Phase 3 (delta scan): $($SharedItems.Count) shared items, $FailedDrives drive scans failed, $LargeDrives large drives streamed (+$([math]::Round(((Get-Date) - $StartTime).TotalSeconds,1))s)"
 
         # 4) Fetch the permissions of every shared item and 5) build one row per sharing link (any
         #    scope) or direct grant to an external user. Batched for the same memory reason as the
@@ -182,7 +225,7 @@ function Set-CIPPDBCacheSharePointSharingLinks {
                 @{
                     id     = "$RequestId"
                     method = 'GET'
-                    url    = "drives/$($Entry.Drive.id)/items/$($Entry.Item.id)/permissions"
+                    url    = "drives/$($Entry.DriveId)/items/$($Entry.ItemId)/permissions"
                 }
                 $RequestId++
             }
@@ -200,9 +243,6 @@ function Set-CIPPDBCacheSharePointSharingLinks {
             foreach ($Response in $PermissionResponses) {
                 if ($Response.status -and $Response.status -ne 200) { $FailedPermissionLookups++; continue }
                 $Entry = $SharedItemByRequestId["$($Response.id)"]
-                $Site = $Entry.Site
-                $Drive = $Entry.Drive
-                $Item = $Entry.Item
 
                 foreach ($Permission in @($Response.body.value)) {
                     # Only permissions set on the item itself; inherited ones are reported on their parent.
@@ -243,19 +283,19 @@ function Set-CIPPDBCacheSharePointSharingLinks {
                     $SharedWith = @($Recipients | ForEach-Object { Get-CIPPIdentityLabel -Identity $_ } | Where-Object { $_ } | Sort-Object -Unique)
 
                     $Rows.Add([PSCustomObject]@{
-                            id                   = "$($Drive.id)_$($Item.id)_$($Permission.id)"
-                            siteId               = $Site.id
-                            siteName             = $Site.displayName ?? $Site.name
-                            siteUrl              = $Site.webUrl
-                            workload             = if ($Site.isPersonalSite) { 'OneDrive' } else { 'SharePoint' }
-                            driveId              = $Drive.id
-                            driveName            = $Drive.name
-                            itemId               = $Item.id
-                            fileName             = $Item.name
-                            itemUrl              = $Item.webUrl
-                            itemType             = if ($Item.folder) { 'Folder' } else { 'File' }
-                            size                 = $Item.size
-                            lastModifiedDateTime = $Item.lastModifiedDateTime
+                            id                   = "$($Entry.DriveId)_$($Entry.ItemId)_$($Permission.id)"
+                            siteId               = $Entry.SiteId
+                            siteName             = $Entry.SiteName
+                            siteUrl              = $Entry.SiteUrl
+                            workload             = if ($Entry.IsPersonalSite) { 'OneDrive' } else { 'SharePoint' }
+                            driveId              = $Entry.DriveId
+                            driveName            = $Entry.DriveName
+                            itemId               = $Entry.ItemId
+                            fileName             = $Entry.FileName
+                            itemUrl              = $Entry.ItemUrl
+                            itemType             = if ($Entry.IsFolder) { 'Folder' } else { 'File' }
+                            size                 = $Entry.Size
+                            lastModifiedDateTime = $Entry.LastModified
                             permissionId         = $Permission.id
                             linkType             = $LinkType
                             linkScope            = $LinkScope
