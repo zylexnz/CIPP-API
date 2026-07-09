@@ -45,6 +45,7 @@ function Set-CIPPSAMCertificate {
         }
         $Secret | Add-Member -MemberType NoteProperty -Name $Name -Value $PfxBase64 -Force
         Add-AzDataTableEntity @Table -Entity $Secret -Force
+        Update-CIPPSAMCertificateEnvCache -Name $Name -PfxBase64 $PfxBase64
         return @{ StorageMode = 'DevTable'; Name = $Name }
     }
 
@@ -82,6 +83,7 @@ function Set-CIPPSAMCertificate {
 
     if ($StatusCode -ge 200 -and $StatusCode -lt 300) {
         Write-LogMessage -API 'SAMCertificate' -message "Stored SAM certificate '$Name' as a Key Vault certificate in vault '$VaultName'" -sev 'Info'
+        Update-CIPPSAMCertificateEnvCache -Name $Name -PfxBase64 $PfxBase64
         return @{ StorageMode = 'Certificate'; Name = $Name; VaultName = $VaultName }
     }
 
@@ -99,6 +101,7 @@ function Set-CIPPSAMCertificate {
             Write-LogMessage -API 'SAMCertificate' -message "Failed to store SAM certificate '$Name' in vault '$VaultName'. If certificate permissions were removed from the Key Vault access policy after the certificate was stored via the certificates API, restore them (get, list, import, update, delete). See Log Data for details." -sev 'CRITICAL' -LogData (Get-CippException -Exception $_)
             throw
         }
+        Update-CIPPSAMCertificateEnvCache -Name $Name -PfxBase64 $PfxBase64
         return @{ StorageMode = 'Secret'; Name = $Name; VaultName = $VaultName }
     }
 

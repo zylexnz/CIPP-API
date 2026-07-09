@@ -39,7 +39,10 @@ function Get-CIPPSAMCertificate {
         return $script:SAMCertificateCache.$Name.Result
     }
 
-    if ($env:AzureWebJobsStorage -eq 'UseDevelopmentStorage=true' -or $env:NonLocalHostAzurite -eq 'true') {
+    if (-not $SkipCache -and $Name -eq 'SAMCertificate' -and $env:SAMCertificate) {
+        # Preloaded by Get-CIPPAuthentication at startup (and refreshed by Set-CIPPSAMCertificate)
+        $PfxBase64 = $env:SAMCertificate
+    } elseif ($env:AzureWebJobsStorage -eq 'UseDevelopmentStorage=true' -or $env:NonLocalHostAzurite -eq 'true') {
         $Table = Get-CIPPTable -tablename 'DevSecrets'
         $Secret = Get-CIPPAzDataTableEntity @Table -Filter "PartitionKey eq 'Secret' and RowKey eq 'Secret'"
         $PfxBase64 = $Secret.$Name
