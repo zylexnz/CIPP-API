@@ -14,6 +14,7 @@ function Get-CIPPSchedulerBlockedCommands {
         # Token & authentication functions - would exfiltrate access/refresh tokens
         'Get-GraphToken'
         'Get-GraphTokenFromCert'
+        'New-CIPPCertificateAssertion'
         'Get-ClassicAPIToken'
         'Get-CIPPAzIdentityToken'
         'Get-CIPPAuthentication'

@@ -14,6 +14,7 @@ function Invoke-ExecCippFunction {
     $BlockList = @(
         'Get-GraphToken'
         'Get-GraphTokenFromCert'
+        'New-CIPPCertificateAssertion'
         'Get-ClassicAPIToken'
         'Get-CIPPSAMCertificate'
         'New-CIPPSAMCertificate'
