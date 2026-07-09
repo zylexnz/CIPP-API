@@ -25,6 +25,7 @@ function New-GraphGetRequest {
         # (e.g. Set-CIPPDBCache* | Add-CIPPDbItem). Trade-off: on a mid-pagination
         # failure, pages already emitted have flowed downstream before the throw.
         [switch]$Stream,
+        [switch]$UseCertificate,
         $Headers
     )
 
@@ -38,10 +39,22 @@ function New-GraphGetRequest {
         if ($headers) {
             $headers = $Headers
         } else {
-            if ($scope -eq 'ExchangeOnline') {
-                $headers = Get-GraphToken -tenantid $tenantid -scope 'https://outlook.office365.com/.default' -AsApp $asapp -SkipCache $skipTokenCache
+            $TokenScope = if ($scope -eq 'ExchangeOnline') { 'https://outlook.office365.com/.default' } else { $scope }
+            if ($UseCertificate) {
+                # App-only auth using the stored SAM certificate (always client_credentials)
+                $SAMCert = Get-CIPPSAMCertificate -ErrorAction Stop
+                if (-not $SAMCert) { throw 'No SAM certificate available. Run Update-CIPPSAMCertificate to create one.' }
+                $CertTokenSplat = @{
+                    TenantId    = if ($tenantid) { $tenantid } else { $env:TenantID }
+                    AppId       = $env:ApplicationID
+                    Certificate = $SAMCert.Certificate
+                }
+                if ($TokenScope) { $CertTokenSplat.Scope = $TokenScope }
+                $CertToken = Get-GraphTokenFromCert @CertTokenSplat -ErrorAction Stop
+                if (-not $CertToken.access_token) { throw "Could not get a token using the SAM certificate for tenant $tenantid" }
+                $headers = @{ Authorization = "Bearer $($CertToken.access_token)" }
             } else {
-                $headers = Get-GraphToken -tenantid $tenantid -scope $scope -AsApp $asapp -SkipCache $skipTokenCache
+                $headers = Get-GraphToken -tenantid $tenantid -scope $TokenScope -AsApp $asapp -SkipCache $skipTokenCache
             }
         }
         if ($ComplexFilter) {

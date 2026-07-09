@@ -122,6 +122,18 @@ function Start-UpdateTokensTimer {
             Write-LogMessage -API 'Update Tokens' -message 'Error updating application secret, will try again in 7 days' -sev 'CRITICAL' -LogData (Get-CippException -Exception $_)
         }
 
+        # Create or renew the SAM certificate when missing or within 30 days of expiry
+        try {
+            $CertResult = Update-CIPPSAMCertificate -ErrorAction Stop
+            if ($CertResult.Renewed) {
+                Write-Information "SAM certificate renewed. Thumbprint: $($CertResult.Thumbprint), expires: $($CertResult.NotAfter), storage mode: $($CertResult.StorageMode)"
+            }
+        } catch {
+            Write-Warning "Error updating SAM certificate $($_.Exception.Message)."
+            Write-Information ($_.InvocationInfo.PositionMessage)
+            Write-LogMessage -API 'Update Tokens' -message 'Error updating SAM certificate, will try again in 7 days' -sev 'CRITICAL' -LogData (Get-CippException -Exception $_)
+        }
+
         # Get new refresh token for each direct added tenant
         $TenantList = Get-Tenants -IncludeAll | Where-Object { $_.Excluded -eq $false -and $_.delegatedPrivilegeStatus -eq 'directTenant' }
         if ($TenantList.Count -eq 0) {

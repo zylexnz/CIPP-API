@@ -32,7 +32,8 @@ function New-ExoRequest {
         [switch]$AvailableCmdlets,
 
         $ModuleVersion = '3.9.2',
-        [switch]$AsApp
+        [switch]$AsApp,
+        [switch]$UseCertificate
     )
     if ((Get-AuthorisedRequest -TenantID $tenantid) -or $NoAuthCheck -eq $True) {
         if ($Compliance.IsPresent) {
@@ -40,7 +41,17 @@ function New-ExoRequest {
         } else {
             $Resource = 'https://outlook.office365.com'
         }
-        $token = Get-GraphToken -Tenantid $tenantid -scope "$Resource/.default" -AsApp:$AsApp.IsPresent
+        if ($UseCertificate) {
+            # App-only auth using the stored SAM certificate (always client_credentials)
+            $SAMCert = Get-CIPPSAMCertificate -ErrorAction Stop
+            if (-not $SAMCert) { throw 'No SAM certificate available. Run Update-CIPPSAMCertificate to create one.' }
+            $CertTenantId = if ($tenantid) { $tenantid } else { $env:TenantID }
+            $CertToken = Get-GraphTokenFromCert -TenantId $CertTenantId -AppId $env:ApplicationID -Scope "$Resource/.default" -Certificate $SAMCert.Certificate -ErrorAction Stop
+            if (-not $CertToken.access_token) { throw "Could not get a token using the SAM certificate for tenant $tenantid" }
+            $token = @{ Authorization = "Bearer $($CertToken.access_token)" }
+        } else {
+            $token = Get-GraphToken -Tenantid $tenantid -scope "$Resource/.default" -AsApp:$AsApp.IsPresent
+        }
 
         if ($cmdParams) {
             #if cmdParams is a pscustomobject, convert to hashtable, otherwise leave as is
