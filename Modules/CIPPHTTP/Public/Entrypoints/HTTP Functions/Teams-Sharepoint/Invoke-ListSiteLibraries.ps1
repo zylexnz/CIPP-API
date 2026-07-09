@@ -18,6 +18,20 @@ function Invoke-ListSiteLibraries {
     $SiteUrl = $Request.Query.SiteUrl ?? $Request.Body.SiteUrl
 
     try {
+        # Resolve the site addressing segment: prefer the Graph site id, else hostname:path from the URL.
+        if (-not [string]::IsNullOrWhiteSpace($SiteId)) {
+            $SiteSegment = $SiteId
+        } elseif (-not [string]::IsNullOrWhiteSpace($SiteUrl)) {
+            $ParsedUrl = [System.Uri]$SiteUrl
+            $SiteSegment = if ($ParsedUrl.AbsolutePath -in @('', '/')) {
+                $ParsedUrl.Host
+            } else {
+                "$($ParsedUrl.Host):$($ParsedUrl.AbsolutePath):"
+            }
+        } else {
+            throw 'SiteId or SiteUrl is required.'
+        }
+
         $Lists = New-GraphGetRequest -uri "https://graph.microsoft.com/beta/sites/$SiteSegment/lists?`$select=id,displayName,name,webUrl,list" -tenantid $TenantFilter -asapp $true
         # documentLibrary covers regular libraries; webPageLibrary is the Site Pages library.
         $Results = @($Lists | Where-Object { $_.list.hidden -ne $true -and $_.list.template -in @('documentLibrary', 'webPageLibrary') } | ForEach-Object {
