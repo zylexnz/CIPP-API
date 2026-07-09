@@ -20,6 +20,13 @@ function Update-CIPPSAMCertificate {
     .PARAMETER Force
     Renew regardless of the stored certificate's expiry.
 
+    .PARAMETER ApplicationId
+    The app registration (client) id to manage the certificate for. Defaults to the SAM app.
+
+    .PARAMETER Headers
+    Optional pre-built authorization headers for the Graph calls (e.g. the delegated token
+    during the setup wizard, before the app's own credentials are usable).
+
     .EXAMPLE
     Update-CIPPSAMCertificate
 
@@ -31,11 +38,17 @@ function Update-CIPPSAMCertificate {
         [Parameter(Mandatory = $false)]
         [int]$RenewalThresholdDays = 30,
 
-        [switch]$Force
+        [switch]$Force,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ApplicationId,
+
+        [Parameter(Mandatory = $false)]
+        $Headers
     )
 
-    $AppId = $env:ApplicationID
-    $AppRegistration = New-GraphGetRequest -uri "https://graph.microsoft.com/v1.0/applications(appId='$AppId')?`$select=id,keyCredentials" -NoAuthCheck $true -AsApp $true -ErrorAction Stop
+    $AppId = if ($ApplicationId) { $ApplicationId } else { $env:ApplicationID }
+    $AppRegistration = New-GraphGetRequest -uri "https://graph.microsoft.com/v1.0/applications(appId='$AppId')?`$select=id,keyCredentials" -NoAuthCheck $true -AsApp $true -Headers $Headers -ErrorAction Stop
 
     $Stored = $null
     try {
@@ -77,6 +90,16 @@ function Update-CIPPSAMCertificate {
     }
 
     Write-Information "Renewing SAM certificate for $AppId. Reason: $RenewalReason"
+
+    # Ensure the CIPP exemption policy covers key credential restrictions (asymmetricKeyLifetime /
+    # trustedCertificateAuthority would otherwise block registering a 1 year self-signed certificate)
+    try {
+        $AppPolicyStatus = Update-AppManagementPolicy -ApplicationId $AppId -Headers $Headers
+        if ($AppPolicyStatus.PolicyAction) { Write-Information $AppPolicyStatus.PolicyAction }
+    } catch {
+        Write-Warning "Error updating app management policy $($_.Exception.Message)."
+    }
+
     $NewCert = New-CIPPSAMCertificate
 
     # Keep still-valid credentials (rotation overlap) and prune expired ones in the same PATCH.
@@ -105,7 +128,7 @@ function Update-CIPPSAMCertificate {
         })
 
     $PatchBody = @{ keyCredentials = $KeyCredentials } | ConvertTo-Json -Compress -Depth 10
-    New-GraphPOSTRequest -type PATCH -uri "https://graph.microsoft.com/v1.0/applications/$($AppRegistration.id)" -Body $PatchBody -NoAuthCheck $true -AsApp $true -ErrorAction Stop
+    New-GraphPOSTRequest -type PATCH -uri "https://graph.microsoft.com/v1.0/applications/$($AppRegistration.id)" -Body $PatchBody -NoAuthCheck $true -AsApp $true -Headers $Headers -ErrorAction Stop
     Write-Information "Registered new SAM certificate $($NewCert.Thumbprint) on application $AppId"
 
     try {
@@ -118,7 +141,7 @@ function Update-CIPPSAMCertificate {
         try {
             $RollbackCredentials = $KeyCredentials | Where-Object { $_.key -ne $NewCert.PublicKeyBase64 }
             $RollbackBody = @{ keyCredentials = @($RollbackCredentials) } | ConvertTo-Json -Compress -Depth 10
-            New-GraphPOSTRequest -type PATCH -uri "https://graph.microsoft.com/v1.0/applications/$($AppRegistration.id)" -Body $RollbackBody -NoAuthCheck $true -AsApp $true -ErrorAction Stop
+            New-GraphPOSTRequest -type PATCH -uri "https://graph.microsoft.com/v1.0/applications/$($AppRegistration.id)" -Body $RollbackBody -NoAuthCheck $true -AsApp $true -Headers $Headers -ErrorAction Stop
             Write-Information "Rolled back unstored SAM certificate $($NewCert.Thumbprint) from application $AppId"
         } catch {
             # Rollback failed - the drift check on the next run will force a fresh renewal
