@@ -103,28 +103,40 @@ function Set-CIPPDBCacheSharePointSharingLinks {
         Write-Host "[SharingLinks][$TenantFilter] Phase 2 (site drives): $($DriveEntries.Count) drives, $FailedDriveLookups site drive lookups failed (+$([math]::Round(((Get-Date) - $StartTime).TotalSeconds,1))s)"
 
         # 3) Delta-scan every drive and keep items that carry the "shared" facet.
-        $DriveByRequestId = @{}
-        $RequestId = 0
-        $DeltaRequests = foreach ($Entry in $DriveEntries) {
-            $DriveByRequestId["$RequestId"] = $Entry
-            @{
-                id     = "$RequestId"
-                method = 'GET'
-                url    = "drives/$($Entry.Drive.id)/root/delta?`$select=id,name,webUrl,parentReference,file,folder,shared,size,lastModifiedDateTime&`$top=999"
-            }
-            $RequestId++
-        }
-
+        #    Enumerating every driveItem across hundreds of drives in a single bulk call buffers
+        #    the whole tenant's file tree in memory and OOMs the worker on large tenants. Scan a
+        #    small number of drives per bulk call instead, extract only shared items, and release
+        #    the raw item pages between batches to keep peak memory bounded.
+        $DeltaBatchSize = 20
         $SharedItems = [System.Collections.Generic.List[object]]::new()
         $FailedDrives = 0
-        if (@($DeltaRequests).Count -gt 0) {
-            Write-Host "[SharingLinks][$TenantFilter] Phase 3 (delta scan): scanning $(@($DeltaRequests).Count) drives for shared items"
+        $DriveTotal = $DriveEntries.Count
+        Write-Host "[SharingLinks][$TenantFilter] Phase 3 (delta scan): scanning $DriveTotal drives for shared items in batches of $DeltaBatchSize"
+        for ($Offset = 0; $Offset -lt $DriveTotal; $Offset += $DeltaBatchSize) {
+            $BatchEntries = @($DriveEntries[$Offset..([Math]::Min($Offset + $DeltaBatchSize - 1, $DriveTotal - 1))])
+            $DriveByRequestId = @{}
+            $RequestId = 0
+            $DeltaRequests = foreach ($Entry in $BatchEntries) {
+                $DriveByRequestId["$RequestId"] = $Entry
+                @{
+                    id     = "$RequestId"
+                    method = 'GET'
+                    url    = "drives/$($Entry.Drive.id)/root/delta?`$select=id,name,webUrl,folder,shared,size,lastModifiedDateTime&`$top=999"
+                }
+                $RequestId++
+            }
+
             try {
                 $DeltaResponses = New-GraphBulkRequest -tenantid $TenantFilter -Requests @($DeltaRequests) -asapp $true
             } catch {
-                Write-Host "[SharingLinks][$TenantFilter] Phase 3 (delta scan) BULK FAILED after $([math]::Round(((Get-Date) - $StartTime).TotalSeconds,1))s: $($_.Exception.Message)"
-                throw
+                # A whole-batch failure (throttle/OOM/token) loses only this batch's drives, not the run.
+                $FailedDrives += @($BatchEntries).Count
+                Write-Host "[SharingLinks][$TenantFilter] Phase 3: batch at offset $Offset ($(@($BatchEntries).Count) drives) BULK FAILED: $($_.Exception.Message)"
+                $DeltaResponses = $null
+                [System.GC]::Collect()
+                continue
             }
+
             foreach ($Response in $DeltaResponses) {
                 if ($Response.status -and $Response.status -ne 200) {
                     $FailedDrives++
@@ -139,33 +151,52 @@ function Set-CIPPDBCacheSharePointSharingLinks {
                     }
                 }
             }
+
+            # Release this batch's raw item pages before the next batch.
+            $DeltaResponses = $null
+            [System.GC]::Collect()
+            Write-Host "[SharingLinks][$TenantFilter] Phase 3: processed $([Math]::Min($Offset + $DeltaBatchSize, $DriveTotal))/$DriveTotal drives, $($SharedItems.Count) shared so far (+$([math]::Round(((Get-Date) - $StartTime).TotalSeconds,1))s)"
+        }
+        # If every drive failed, don't proceed to overwrite good cached data with an empty set.
+        if ($DriveTotal -gt 0 -and $FailedDrives -ge $DriveTotal) {
+            throw "All $DriveTotal drive delta scans failed - aborting to preserve existing cache."
         }
         Write-Host "[SharingLinks][$TenantFilter] Phase 3 (delta scan): $($SharedItems.Count) shared items, $FailedDrives drive scans failed (+$([math]::Round(((Get-Date) - $StartTime).TotalSeconds,1))s)"
 
-        # 4) Fetch the permissions of every shared item, in bulk.
-        $SharedItemByRequestId = @{}
-        $RequestId = 0
-        $PermissionRequests = foreach ($Entry in $SharedItems) {
-            $SharedItemByRequestId["$RequestId"] = $Entry
-            @{
-                id     = "$RequestId"
-                method = 'GET'
-                url    = "drives/$($Entry.Drive.id)/items/$($Entry.Item.id)/permissions"
-            }
-            $RequestId++
-        }
-
-        # 5) Build one row per sharing link (any scope) or direct grant to an external user.
+        # 4) Fetch the permissions of every shared item and 5) build one row per sharing link (any
+        #    scope) or direct grant to an external user. Batched for the same memory reason as the
+        #    delta scan above.
+        $PermissionBatchSize = 100
         $Rows = [System.Collections.Generic.List[object]]::new()
         $FailedPermissionLookups = 0
-        if (@($PermissionRequests).Count -gt 0) {
-            Write-Host "[SharingLinks][$TenantFilter] Phase 4 (permissions): fetching permissions for $(@($PermissionRequests).Count) shared items"
+        $SharedTotal = $SharedItems.Count
+        if ($SharedTotal -gt 0) {
+            Write-Host "[SharingLinks][$TenantFilter] Phase 4 (permissions): fetching permissions for $SharedTotal shared items in batches of $PermissionBatchSize"
+        }
+        for ($Offset = 0; $Offset -lt $SharedTotal; $Offset += $PermissionBatchSize) {
+            $BatchShared = @($SharedItems[$Offset..([Math]::Min($Offset + $PermissionBatchSize - 1, $SharedTotal - 1))])
+            $SharedItemByRequestId = @{}
+            $RequestId = 0
+            $PermissionRequests = foreach ($Entry in $BatchShared) {
+                $SharedItemByRequestId["$RequestId"] = $Entry
+                @{
+                    id     = "$RequestId"
+                    method = 'GET'
+                    url    = "drives/$($Entry.Drive.id)/items/$($Entry.Item.id)/permissions"
+                }
+                $RequestId++
+            }
+
             try {
                 $PermissionResponses = New-GraphBulkRequest -tenantid $TenantFilter -Requests @($PermissionRequests) -asapp $true
             } catch {
-                Write-Host "[SharingLinks][$TenantFilter] Phase 4 (permissions) BULK FAILED after $([math]::Round(((Get-Date) - $StartTime).TotalSeconds,1))s: $($_.Exception.Message)"
-                throw
+                $FailedPermissionLookups += @($BatchShared).Count
+                Write-Host "[SharingLinks][$TenantFilter] Phase 4: batch at offset $Offset ($(@($BatchShared).Count) items) BULK FAILED: $($_.Exception.Message)"
+                $PermissionResponses = $null
+                [System.GC]::Collect()
+                continue
             }
+
             foreach ($Response in $PermissionResponses) {
                 if ($Response.status -and $Response.status -ne 200) { $FailedPermissionLookups++; continue }
                 $Entry = $SharedItemByRequestId["$($Response.id)"]
@@ -237,6 +268,10 @@ function Set-CIPPDBCacheSharePointSharingLinks {
                         })
                 }
             }
+
+            $PermissionResponses = $null
+            [System.GC]::Collect()
+            Write-Host "[SharingLinks][$TenantFilter] Phase 4: processed $([Math]::Min($Offset + $PermissionBatchSize, $SharedTotal))/$SharedTotal shared items, $($Rows.Count) links so far (+$([math]::Round(((Get-Date) - $StartTime).TotalSeconds,1))s)"
         }
 
         Write-Host "[SharingLinks][$TenantFilter] Phase 5 (write): writing $($Rows.Count) rows to cache ($FailedPermissionLookups permission lookups failed)"
