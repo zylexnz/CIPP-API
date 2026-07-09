@@ -26,21 +26,10 @@ function New-GraphPOSTRequest {
     if ($NoAuthCheck -or (Get-AuthorisedRequest -Uri $uri -TenantID $tenantid)) {
         if ($Headers) {
             $Headers = $Headers
-        } elseif ($UseCertificate) {
-            # App-only auth using the stored SAM certificate (always client_credentials)
-            $SAMCert = Get-CIPPSAMCertificate -ErrorAction Stop
-            if (-not $SAMCert) { throw 'No SAM certificate available. Run Update-CIPPSAMCertificate to create one.' }
-            $CertTokenSplat = @{
-                TenantId    = if ($tenantid) { $tenantid } else { $env:TenantID }
-                AppId       = $env:ApplicationID
-                Certificate = $SAMCert.Certificate
-            }
-            if ($scope) { $CertTokenSplat.Scope = $scope }
-            $CertToken = Get-GraphTokenFromCert @CertTokenSplat -ErrorAction Stop
-            if (-not $CertToken.access_token) { throw "Could not get a token using the SAM certificate for tenant $tenantid" }
-            $Headers = @{ Authorization = "Bearer $($CertToken.access_token)" }
         } else {
-            $Headers = Get-GraphToken -tenantid $tenantid -scope $scope -AsApp $asapp -SkipCache $skipTokenCache
+            # -UseCertificate authenticates the app with the SAM certificate instead of the
+            # client secret: delegated (refresh token) by default, app-only with -AsApp $true
+            $Headers = Get-GraphToken -tenantid $tenantid -scope $scope -AsApp $asapp -SkipCache $skipTokenCache -UseCertificate:$UseCertificate
         }
         if ($AddedHeaders) {
             foreach ($header in $AddedHeaders.GetEnumerator()) {

@@ -1,8 +1,20 @@
-function Get-GraphToken($tenantid, $scope, $AsApp, $AppID, $AppSecret, $refreshToken, $ReturnRefresh, $SkipCache) {
+function Get-GraphToken {
     <#
     .FUNCTIONALITY
     Internal
     #>
+    [CmdletBinding()]
+    param(
+        $tenantid,
+        $scope,
+        $AsApp,
+        $AppID,
+        $AppSecret,
+        $refreshToken,
+        $ReturnRefresh,
+        $SkipCache,
+        [switch]$UseCertificate
+    )
     if (!$scope) { $scope = 'https://graph.microsoft.com/.default' }
     if (!$tenantid) { $tenantid = $env:TenantID }
 
@@ -12,6 +24,7 @@ function Get-GraphToken($tenantid, $scope, $AsApp, $AppID, $AppSecret, $refreshT
     if ($UseSharedTokenCache) {
         $CacheClientId = if ($AppID) { [string]$AppID } else { [string]$env:ApplicationID }
         $GrantType = if ($asApp -eq $true -or ($null -ne $AppID -and $null -ne $AppSecret)) { 'client_credentials' } else { 'refresh_token' }
+        if ($UseCertificate -eq $true) { $GrantType = "${GrantType}_certificate" }
         $SharedTokenCacheKey = [CIPP.CIPPTokenCache]::BuildKey([string]$tenantid, [string]$scope, [bool]$asApp, $CacheClientId, $GrantType)
         $SharedCacheEntry = [CIPP.CIPPTokenCache]::Lookup($SharedTokenCacheKey, 120)
         if ($SharedCacheEntry.Found -and -not [string]::IsNullOrWhiteSpace($SharedCacheEntry.TokenPayloadJson)) {
@@ -135,11 +148,30 @@ function Get-GraphToken($tenantid, $scope, $AsApp, $AppID, $AppSecret, $refreshT
     if ($UseSharedTokenCache) {
         $CacheClientId = if ($AppID) { [string]$AppID } else { [string]$env:ApplicationID }
         $GrantType = if ($asApp -eq $true -or ($null -ne $AppID -and $null -ne $AppSecret)) { 'client_credentials' } else { 'refresh_token' }
+        if ($UseCertificate -eq $true) { $GrantType = "${GrantType}_certificate" }
         $SharedTokenCacheKey = [CIPP.CIPPTokenCache]::BuildKey([string]$tenantid, [string]$scope, [bool]$asApp, $CacheClientId, $GrantType)
     }
 
     try {
-        $AccessToken = (Invoke-CIPPRestMethod -Method post -Uri "https://login.microsoftonline.com/$($tenantid)/oauth2/v2.0/token" -Body $Authbody -ContentType 'application/x-www-form-urlencoded' -ErrorAction Stop)
+        if ($UseCertificate -eq $true) {
+            $SAMCert = Get-CIPPSAMCertificate -ErrorAction Stop
+            if (-not $SAMCert) { throw 'No SAM certificate available. Run Update-CIPPSAMCertificate to create one.' }
+        }
+        if ($UseCertificate -eq $true -and $AuthBody.grant_type -eq 'client_credentials') {
+            # App-only with certificate: use the dedicated cert token function
+            # (has its own cache under the same key and the AADSTS700027 retry)
+            $AccessToken = Get-GraphTokenFromCert -TenantId $tenantid -AppId $AuthBody.client_id -Scope $scope -Certificate $SAMCert.Certificate -SkipCache:($SkipCache -eq $true) -ErrorAction Stop
+            if (-not $AccessToken.access_token) { throw "Could not get a token using the SAM certificate for $tenantid" }
+        } else {
+            if ($UseCertificate -eq $true) {
+                # Delegated with certificate: authenticate the app with a signed assertion
+                # instead of the client secret; the refresh token still provides user context
+                $null = $AuthBody.Remove('client_secret')
+                $AuthBody.client_assertion_type = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer'
+                $AuthBody.client_assertion = New-CIPPCertificateAssertion -TenantId $tenantid -AppId $AuthBody.client_id -Certificate $SAMCert.Certificate
+            }
+            $AccessToken = (Invoke-CIPPRestMethod -Method post -Uri "https://login.microsoftonline.com/$($tenantid)/oauth2/v2.0/token" -Body $Authbody -ContentType 'application/x-www-form-urlencoded' -ErrorAction Stop)
+        }
         if ($null -eq $AccessToken.expires_on -and $AccessToken.expires_in) {
             $ExpiresOn = [int](Get-Date -UFormat %s -Millisecond 0) + $AccessToken.expires_in
             Add-Member -InputObject $AccessToken -NotePropertyName 'expires_on' -NotePropertyValue $ExpiresOn -Force
