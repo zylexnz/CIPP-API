@@ -42,6 +42,8 @@ function Set-CIPPDBCacheSharePointSharingLinks {
         $Identity.user.email ?? $Identity.user.userPrincipalName ?? $Identity.siteUser.email ?? $Identity.user.displayName ?? $Identity.siteUser.displayName ?? $Identity.group.email ?? $Identity.group.displayName ?? $Identity.siteGroup.displayName
     }
 
+    $StartTime = Get-Date
+    Write-Host "[SharingLinks][$TenantFilter] START at $($StartTime.ToString('o'))"
     try {
         Write-LogMessage -API 'CIPPDBCache' -tenant $TenantFilter -message 'Caching SharePoint and OneDrive sharing links' -sev Debug
 
@@ -50,12 +52,20 @@ function Set-CIPPDBCacheSharePointSharingLinks {
         try {
             $Domains = New-GraphGetRequest -uri "https://graph.microsoft.com/v1.0/domains?`$select=id,isVerified" -tenantid $TenantFilter -asapp $true
             foreach ($Domain in ($Domains | Where-Object { $_.isVerified })) { [void]$InternalDomains.Add($Domain.id) }
+            Write-Host "[SharingLinks][$TenantFilter] Phase 0 (domains): $($InternalDomains.Count) verified domains"
         } catch {
+            Write-Host "[SharingLinks][$TenantFilter] Phase 0 (domains) FAILED: $($_.Exception.Message)"
             Write-LogMessage -API 'CIPPDBCache' -tenant $TenantFilter -message "Could not list verified domains for sharing link classification: $($_.Exception.Message)" -sev Warning
         }
 
         # 1) All sites, including OneDrive personal sites.
-        $Sites = @(New-GraphGetRequest -uri "https://graph.microsoft.com/beta/sites/getAllSites?`$select=id,displayName,name,webUrl,isPersonalSite&`$top=999" -tenantid $TenantFilter -asapp $true)
+        try {
+            $Sites = @(New-GraphGetRequest -uri "https://graph.microsoft.com/beta/sites/getAllSites?`$select=id,displayName,name,webUrl,isPersonalSite&`$top=999" -tenantid $TenantFilter -asapp $true)
+        } catch {
+            Write-Host "[SharingLinks][$TenantFilter] Phase 1 (getAllSites) FAILED: $($_.Exception.Message)"
+            throw
+        }
+        Write-Host "[SharingLinks][$TenantFilter] Phase 1 (getAllSites): $($Sites.Count) sites (+$([math]::Round(((Get-Date) - $StartTime).TotalSeconds,1))s)"
 
         # 2) All document libraries (drives) per site, in bulk.
         $SiteByRequestId = @{}
@@ -71,10 +81,17 @@ function Set-CIPPDBCacheSharePointSharingLinks {
         }
 
         $DriveEntries = [System.Collections.Generic.List[object]]::new()
+        $FailedDriveLookups = 0
         if (@($DriveRequests).Count -gt 0) {
-            $DriveResponses = New-GraphBulkRequest -tenantid $TenantFilter -Requests @($DriveRequests) -asapp $true
+            Write-Host "[SharingLinks][$TenantFilter] Phase 2 (site drives): requesting drives for $(@($DriveRequests).Count) sites"
+            try {
+                $DriveResponses = New-GraphBulkRequest -tenantid $TenantFilter -Requests @($DriveRequests) -asapp $true
+            } catch {
+                Write-Host "[SharingLinks][$TenantFilter] Phase 2 (site drives) BULK FAILED: $($_.Exception.Message)"
+                throw
+            }
             foreach ($Response in $DriveResponses) {
-                if ($Response.status -and $Response.status -ne 200) { continue }
+                if ($Response.status -and $Response.status -ne 200) { $FailedDriveLookups++; continue }
                 $Site = $SiteByRequestId["$($Response.id)"]
                 foreach ($Drive in @($Response.body.value)) {
                     if ($Drive.id) {
@@ -83,6 +100,7 @@ function Set-CIPPDBCacheSharePointSharingLinks {
                 }
             }
         }
+        Write-Host "[SharingLinks][$TenantFilter] Phase 2 (site drives): $($DriveEntries.Count) drives, $FailedDriveLookups site drive lookups failed (+$([math]::Round(((Get-Date) - $StartTime).TotalSeconds,1))s)"
 
         # 3) Delta-scan every drive and keep items that carry the "shared" facet.
         $DriveByRequestId = @{}
@@ -100,9 +118,20 @@ function Set-CIPPDBCacheSharePointSharingLinks {
         $SharedItems = [System.Collections.Generic.List[object]]::new()
         $FailedDrives = 0
         if (@($DeltaRequests).Count -gt 0) {
-            $DeltaResponses = New-GraphBulkRequest -tenantid $TenantFilter -Requests @($DeltaRequests) -asapp $true
+            Write-Host "[SharingLinks][$TenantFilter] Phase 3 (delta scan): scanning $(@($DeltaRequests).Count) drives for shared items"
+            try {
+                $DeltaResponses = New-GraphBulkRequest -tenantid $TenantFilter -Requests @($DeltaRequests) -asapp $true
+            } catch {
+                Write-Host "[SharingLinks][$TenantFilter] Phase 3 (delta scan) BULK FAILED after $([math]::Round(((Get-Date) - $StartTime).TotalSeconds,1))s: $($_.Exception.Message)"
+                throw
+            }
             foreach ($Response in $DeltaResponses) {
-                if ($Response.status -and $Response.status -ne 200) { $FailedDrives++; continue }
+                if ($Response.status -and $Response.status -ne 200) {
+                    $FailedDrives++
+                    $FailedEntry = $DriveByRequestId["$($Response.id)"]
+                    Write-Host "[SharingLinks][$TenantFilter] Phase 3: drive delta returned status $($Response.status) for '$($FailedEntry.Site.webUrl)' / '$($FailedEntry.Drive.name)' - $($Response.body.error.message)"
+                    continue
+                }
                 $Entry = $DriveByRequestId["$($Response.id)"]
                 foreach ($Item in @($Response.body.value)) {
                     if ($Item.shared -and -not $Item.deleted) {
@@ -111,6 +140,7 @@ function Set-CIPPDBCacheSharePointSharingLinks {
                 }
             }
         }
+        Write-Host "[SharingLinks][$TenantFilter] Phase 3 (delta scan): $($SharedItems.Count) shared items, $FailedDrives drive scans failed (+$([math]::Round(((Get-Date) - $StartTime).TotalSeconds,1))s)"
 
         # 4) Fetch the permissions of every shared item, in bulk.
         $SharedItemByRequestId = @{}
@@ -127,10 +157,17 @@ function Set-CIPPDBCacheSharePointSharingLinks {
 
         # 5) Build one row per sharing link (any scope) or direct grant to an external user.
         $Rows = [System.Collections.Generic.List[object]]::new()
+        $FailedPermissionLookups = 0
         if (@($PermissionRequests).Count -gt 0) {
-            $PermissionResponses = New-GraphBulkRequest -tenantid $TenantFilter -Requests @($PermissionRequests) -asapp $true
+            Write-Host "[SharingLinks][$TenantFilter] Phase 4 (permissions): fetching permissions for $(@($PermissionRequests).Count) shared items"
+            try {
+                $PermissionResponses = New-GraphBulkRequest -tenantid $TenantFilter -Requests @($PermissionRequests) -asapp $true
+            } catch {
+                Write-Host "[SharingLinks][$TenantFilter] Phase 4 (permissions) BULK FAILED after $([math]::Round(((Get-Date) - $StartTime).TotalSeconds,1))s: $($_.Exception.Message)"
+                throw
+            }
             foreach ($Response in $PermissionResponses) {
-                if ($Response.status -and $Response.status -ne 200) { continue }
+                if ($Response.status -and $Response.status -ne 200) { $FailedPermissionLookups++; continue }
                 $Entry = $SharedItemByRequestId["$($Response.id)"]
                 $Site = $Entry.Site
                 $Drive = $Entry.Drive
@@ -202,12 +239,15 @@ function Set-CIPPDBCacheSharePointSharingLinks {
             }
         }
 
+        Write-Host "[SharingLinks][$TenantFilter] Phase 5 (write): writing $($Rows.Count) rows to cache ($FailedPermissionLookups permission lookups failed)"
         Add-CIPPDbItem -TenantFilter $TenantFilter -Type 'SharePointSharingLinks' -Data @($Rows) -AddCount
 
         $Message = "Cached $($Rows.Count) sharing links across $($DriveEntries.Count) drives" + $(if ($FailedDrives -gt 0) { " ($FailedDrives drives could not be scanned)" } else { '' })
+        Write-Host "[SharingLinks][$TenantFilter] DONE: $Message (total $([math]::Round(((Get-Date) - $StartTime).TotalSeconds,1))s)"
         Write-LogMessage -API 'CIPPDBCache' -tenant $TenantFilter -message $Message -sev Debug
 
     } catch {
+        Write-Host "[SharingLinks][$TenantFilter] ABORTED after $([math]::Round(((Get-Date) - $StartTime).TotalSeconds,1))s - existing cache left intact. Error: $($_.Exception.Message)"
         Write-LogMessage -API 'CIPPDBCache' -tenant $TenantFilter -message "Failed to cache SharePoint sharing links: $($_.Exception.Message)" -sev Error -LogData (Get-CippException -Exception $_)
     }
 }
