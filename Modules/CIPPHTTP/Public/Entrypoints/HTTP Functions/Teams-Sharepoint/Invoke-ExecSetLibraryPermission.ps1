@@ -34,12 +34,6 @@ function Invoke-ExecSetLibraryPermission {
     }
 
     try {
-        if ([string]::IsNullOrWhiteSpace($SiteUrl) -or [string]::IsNullOrWhiteSpace($ListId)) {
-            throw 'SiteUrl and ListId are required.'
-        }
-        if (-not $RoleDefinitionIds.ContainsKey([string]$PermissionLevel)) {
-            throw "Invalid permission level '$PermissionLevel'. Valid values are: $($RoleDefinitionIds.Keys -join ', ')."
-        }
         $RoleDefId = $RoleDefinitionIds[[string]$PermissionLevel]
 
         # Build the claims-encoded logon names for ensureuser.
@@ -75,9 +69,9 @@ function Invoke-ExecSetLibraryPermission {
         $BaseUri = "$($SiteUrl.TrimEnd('/'))/_api"
 
         # Break role inheritance (copying the existing permissions) when the library still inherits.
-        $ListInfo = New-GraphGetRequest -uri "$BaseUri/web/lists(guid'$ListId')?`$select=HasUniqueRoleAssignments" -tenantid $TenantFilter -scope $Scope -extraHeaders $JsonAccept -UseCertificate
+        $ListInfo = New-GraphGetRequest -uri "$BaseUri/web/lists(guid'$ListId')?`$select=HasUniqueRoleAssignments" -tenantid $TenantFilter -scope $Scope -extraHeaders $JsonAccept -UseCertificate -AsApp $true
         if (-not $ListInfo.HasUniqueRoleAssignments) {
-            $null = New-GraphPostRequest -uri "$BaseUri/web/lists(guid'$ListId')/breakroleinheritance(copyRoleAssignments=true,clearSubscopes=false)" -tenantid $TenantFilter -scope $Scope -type POST -body '{}' -AddedHeaders $JsonAccept -UseCertificate
+            $null = New-GraphPostRequest -uri "$BaseUri/web/lists(guid'$ListId')/breakroleinheritance(copyRoleAssignments=true,clearSubscopes=false)" -tenantid $TenantFilter -scope $Scope -type POST -body '{}' -AddedHeaders $JsonAccept -UseCertificate -AsApp $true
         }
 
         $Granted = [System.Collections.Generic.List[string]]::new()
@@ -85,11 +79,11 @@ function Invoke-ExecSetLibraryPermission {
         foreach ($Principal in $Principals) {
             try {
                 $EnsureBody = ConvertTo-Json -Compress -InputObject @{ logonName = $Principal.LogonName }
-                $EnsuredUser = New-GraphPostRequest -uri "$BaseUri/web/ensureuser" -tenantid $TenantFilter -scope $Scope -type POST -body $EnsureBody -AddedHeaders $JsonAccept -UseCertificate
+                $EnsuredUser = New-GraphPostRequest -uri "$BaseUri/web/ensureuser" -tenantid $TenantFilter -scope $Scope -type POST -body $EnsureBody -AddedHeaders $JsonAccept -UseCertificate -AsApp $true
                 if (-not $EnsuredUser.Id) {
                     throw 'Could not resolve principal on the site.'
                 }
-                $null = New-GraphPostRequest -uri "$BaseUri/web/lists(guid'$ListId')/roleassignments/addroleassignment(principalid=$($EnsuredUser.Id),roledefid=$RoleDefId)" -tenantid $TenantFilter -scope $Scope -type POST -body '{}' -AddedHeaders $JsonAccept -UseCertificate
+                $null = New-GraphPostRequest -uri "$BaseUri/web/lists(guid'$ListId')/roleassignments/addroleassignment(principalid=$($EnsuredUser.Id),roledefid=$RoleDefId)" -tenantid $TenantFilter -scope $Scope -type POST -body '{}' -AddedHeaders $JsonAccept -UseCertificate -AsApp $true
                 $Granted.Add($Principal.Label)
             } catch {
                 $Failed.Add("$($Principal.Label) ($($_.Exception.Message))")
