@@ -19,6 +19,12 @@ function Invoke-ExecUpdateDriftDeviation {
         $BundleEntry = $null
         $TemplatesTable = Get-CippTable -tablename 'templates'
         $LiveTemplate = Get-CIPPAzDataTableEntity @TemplatesTable -Filter "PartitionKey eq '$TemplatePartition' and RowKey eq '$TemplateId'"
+        if (-not $LiveTemplate) {
+            # Built-in templates are keyed as '<guid>.IntuneTemplate.json' / '<guid>.CATemplate.json',
+            # while deviation ids may carry the bare guid - match by prefix as a fallback
+            $LiveTemplate = Get-CIPPAzDataTableEntity @TemplatesTable -Filter "PartitionKey eq '$TemplatePartition'" |
+                Where-Object { $_.RowKey -like "$TemplateId*" } | Select-Object -First 1
+        }
         if ($LiveTemplate.Package) {
             $BundleEntry = $Entries | Where-Object {
                 $TagValues = foreach ($Tag in @($_.'TemplateList-Tags')) {
@@ -84,7 +90,9 @@ function Invoke-ExecUpdateDriftDeviation {
                         $Settings = $null
                         if ($Setting -like '*IntuneTemplate*') {
                             $Setting = 'IntuneTemplate'
-                            $TemplateId = $Deviation.standardName.split('.') | Select-Object -Index 2
+                            # Take everything after the prefix: template ids can contain dots
+                            # (built-in templates are keyed '<guid>.IntuneTemplate.json')
+                            $TemplateId = $Deviation.standardName -replace '^(standards\.)?IntuneTemplates?\.', ''
                             $MatchedTemplate = $StandardTemplate.standardSettings.IntuneTemplate | Where-Object { $_.TemplateList.value -like "*$TemplateId*" } | Select-Object -First 1
                             if (-not $MatchedTemplate) {
                                 # Template may be referenced through a TemplateList-Tags bundle - resolve the
@@ -100,7 +108,9 @@ function Invoke-ExecUpdateDriftDeviation {
                             }
                         } elseif ($Setting -like '*ConditionalAccessTemplate*') {
                             $Setting = 'ConditionalAccessTemplate'
-                            $TemplateId = $Deviation.standardName.split('.') | Select-Object -Index 2
+                            # Take everything after the prefix: template ids can contain dots
+                            # (built-in templates are keyed '<guid>.CATemplate.json')
+                            $TemplateId = $Deviation.standardName -replace '^(standards\.)?ConditionalAccessTemplates?\.', ''
                             $MatchedTemplate = $StandardTemplate.standardSettings.ConditionalAccessTemplate | Where-Object { $_.TemplateList.value -like "*$TemplateId*" } | Select-Object -First 1
                             if (-not $MatchedTemplate) {
                                 # CA templates can be referenced through a TemplateList-Tags bundle too
