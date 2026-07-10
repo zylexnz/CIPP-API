@@ -26,7 +26,7 @@ Function Invoke-ListUsers {
             'employeeHireDate', 'employeeId', 'employeeLeaveDateTime', 'employeeType', 'faxNumber',
             'givenName', 'jobTitle', 'lastPasswordChangeDateTime', 'legalAgeGroupClassification', 'mail',
             'mailNickname', 'mobilePhone', 'officeLocation', 'onPremisesDistinguishedName',
-            'onPremisesLastSyncDateTime', 'onPremisesSyncEnabled', 'otherMails', 'postalCode',
+            'onPremisesImmutableId', 'onPremisesLastSyncDateTime', 'onPremisesSyncEnabled', 'otherMails', 'postalCode',
             'preferredLanguage', 'proxyAddresses', 'showInAddressList', 'state', 'streetAddress',
             'surname', 'usageLocation', 'userPrincipalName', 'userType'
         )
