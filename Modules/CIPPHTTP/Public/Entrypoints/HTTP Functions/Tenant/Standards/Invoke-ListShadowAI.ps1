@@ -68,29 +68,57 @@ function Invoke-ListShadowAI {
     $EntraSynced = $CacheData['ServicePrincipals'].Count -gt 0
     $LastDataRefresh = $CacheTimestamps | Sort-Object | Select-Object -First 1
 
-    # 1) Installed AI tools from the cached Intune detected apps
-    $DetectedApps = [System.Collections.Generic.List[object]]::new()
+    # 1) Installed AI tools from the cached Intune detected apps. The inventory reports a separate
+    #    application entry per version (and per install flavor, e.g. 'Copilot' vs 'Microsoft.Copilot'),
+    #    so merge everything that matches the same catalog tool into ONE row: distinct devices only,
+    #    with the observed application names, versions and platforms combined.
+    $DetectedAppMap = [ordered]@{}
     foreach ($App in $CacheData['DetectedApps']) {
         $Match = Get-AiMatch -Text "$($App.displayName) $($App.publisher)" -Catalog $Catalog
         if (-not $Match) { continue }
-        $DeviceCount = [int]($App.deviceCount ?? 0)
-        if ($DeviceCount -eq 0 -and $App.managedDevices) { $DeviceCount = @($App.managedDevices).Count }
-        $IsSanctioned = $SanctionedTools.ContainsKey($Match.name.ToLower())
+        if (-not $DetectedAppMap.Contains($Match.name)) {
+            $DetectedAppMap[$Match.name] = [PSCustomObject]@{
+                Match        = $Match
+                Sanctioned   = $SanctionedTools.ContainsKey($Match.name.ToLower())
+                Applications = [System.Collections.Generic.List[string]]::new()
+                Publishers   = [System.Collections.Generic.List[string]]::new()
+                Versions     = [System.Collections.Generic.List[string]]::new()
+                Platforms    = [System.Collections.Generic.List[string]]::new()
+                Devices      = [ordered]@{}
+            }
+        }
+        $Entry = $DetectedAppMap[$Match.name]
+        if ($App.displayName -and $Entry.Applications -notcontains [string]$App.displayName) { $Entry.Applications.Add([string]$App.displayName) }
+        if ($App.publisher -and $Entry.Publishers -notcontains [string]$App.publisher) { $Entry.Publishers.Add([string]$App.publisher) }
+        if ($App.version -and $Entry.Versions -notcontains [string]$App.version) { $Entry.Versions.Add([string]$App.version) }
+        $Platform = if ([string]::IsNullOrWhiteSpace($App.platform)) { 'Unknown' } else { [string]$App.platform }
+        if ($Entry.Platforms -notcontains $Platform) { $Entry.Platforms.Add($Platform) }
+        foreach ($Device in @($App.managedDevices ?? @())) {
+            $DeviceKey = if ($Device.id) { [string]$Device.id } else { [string]$Device.deviceName }
+            if ($DeviceKey -and -not $Entry.Devices.Contains($DeviceKey)) { $Entry.Devices[$DeviceKey] = $Device }
+        }
+    }
+
+    $DetectedApps = [System.Collections.Generic.List[object]]::new()
+    foreach ($Entry in $DetectedAppMap.Values) {
+        $Match = $Entry.Match
+        # Inventory rows mix clean publisher names with full certificate subjects - show the shortest
+        $Publisher = $Entry.Publishers | Sort-Object -Property Length | Select-Object -First 1
         $DetectedApps.Add([PSCustomObject]@{
-                application     = $App.displayName
+                application     = ($Entry.Applications | Sort-Object) -join ', '
                 aiTool          = $Match.name
                 vendor          = $Match.vendor
                 category        = $Match.category
-                risk            = if ($IsSanctioned) { 'Informational' } else { $Match.risk }
+                risk            = if ($Entry.Sanctioned) { 'Informational' } else { $Match.risk }
                 catalogRisk     = $Match.risk
-                status          = if ($IsSanctioned) { 'Sanctioned' } else { 'Unsanctioned' }
+                status          = if ($Entry.Sanctioned) { 'Sanctioned' } else { 'Unsanctioned' }
                 toolDescription = $Match.description
                 riskReason      = $Match.riskReason
-                publisher       = $App.publisher
-                version         = $App.version
-                platform        = if ([string]::IsNullOrWhiteSpace($App.platform)) { 'Unknown' } else { $App.platform }
-                deviceCount     = $DeviceCount
-                managedDevices  = @($App.managedDevices ?? @())
+                publisher       = $Publisher
+                version         = ($Entry.Versions | Sort-Object) -join ', '
+                platform        = ($Entry.Platforms | Sort-Object) -join ', '
+                deviceCount     = $Entry.Devices.Count
+                managedDevices  = @($Entry.Devices.Values)
             })
     }
 
