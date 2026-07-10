@@ -5,10 +5,10 @@ function Invoke-ExecRemoveSiteUser {
     .ROLE
         Sharepoint.Site.ReadWrite
     .DESCRIPTION
-        Removes a user from an entire SharePoint site: deleting the site user removes them
-        from every site group and direct permission grant at once. Uses the SharePoint REST
-        API with certificate authentication. Note this does not revoke sharing links the user
-        received by mail; use the sharing link actions for those.
+        Removes a user from one or more SharePoint sites entirely: deleting the site user
+        removes them from every site group and direct permission grant at once. Uses the
+        SharePoint REST API with certificate authentication. Note this does not revoke
+        sharing links the user received by mail; use the sharing link actions for those.
     #>
     [CmdletBinding()]
     param($Request, $TriggerMetadata)
@@ -16,44 +16,34 @@ function Invoke-ExecRemoveSiteUser {
     $APIName = $Request.Params.CIPPEndpoint
     $Headers = $Request.Headers
     $TenantFilter = $Request.Body.tenantFilter
-    $SiteUrl = $Request.Body.SiteUrl
+    # Single site (SiteUrl) or several at once (SiteUrls, e.g. from the External Users report).
+    $SiteUrls = @($Request.Body.SiteUrls ?? $Request.Body.SiteUrl) | Where-Object { $_ }
     # The picker supplies the SP claims login via addedFields; fall back to building it from the UPN.
     $LoginName = $Request.Body.user.addedFields.LoginName ?? $Request.Body.user.value
-    $Label = $Request.Body.user.value ?? $LoginName
+    $Label = $Request.Body.DisplayName ?? $Request.Body.user.value ?? $LoginName
 
     try {
-        if (-not $SiteUrl) { throw 'SiteUrl is required.' }
+        if ($SiteUrls.Count -eq 0) { throw 'SiteUrl is required.' }
         if (-not $LoginName) { throw 'No user was selected.' }
-        if ($LoginName -notmatch '\|') { $LoginName = "i:0#.f|membership|$LoginName" }
 
-        $SharePointInfo = Get-SharePointAdminLink -Public $false -tenantFilter $TenantFilter
-        $Scope = "$($SharePointInfo.SharePointUrl)/.default"
-        $JsonAccept = @{ Accept = 'application/json;odata=nometadata' }
-        $BaseUri = "$($SiteUrl.TrimEnd('/'))/_api"
+        $Removal = Remove-CIPPSPOSiteUser -TenantFilter $TenantFilter -SiteUrls $SiteUrls -LoginName $LoginName
 
-        try {
-            $EnsureBody = ConvertTo-Json -Compress -InputObject @{ logonName = $LoginName }
-            $EnsuredUser = New-GraphPostRequest -uri "$BaseUri/web/ensureuser" -tenantid $TenantFilter -scope $Scope -type POST -body $EnsureBody -contentType 'application/json;odata=nometadata' -AddedHeaders $JsonAccept -UseCertificate -AsApp $true
-        } catch {
-            throw "Could not resolve $Label on the site (ensureuser): $($_.Exception.Message)"
+        $Messages = [System.Collections.Generic.List[string]]::new()
+        if ($Removal.Succeeded.Count -gt 0) {
+            $Messages.Add("Successfully removed $Label (all site groups and direct permissions) from: $($Removal.Succeeded -join ', ').")
         }
-        if (-not $EnsuredUser.Id) { throw "Could not resolve $Label on the site." }
-        if ($EnsuredUser.IsSiteAdmin) {
-            throw "$Label is a site collection admin. Remove their admin permission first (Remove Site Admin action)."
+        if ($Removal.Failed.Count -gt 0) {
+            $Messages.Add("Failed on: $($Removal.Failed -join '; ')")
         }
-
-        try {
-            $null = New-GraphPostRequest -uri "$BaseUri/web/siteusers/removebyid($($EnsuredUser.Id))" -tenantid $TenantFilter -scope $Scope -type POST -body '{}' -contentType 'application/json;odata=nometadata' -AddedHeaders $JsonAccept -UseCertificate -AsApp $true
-        } catch {
-            throw "Could not remove $Label from the site: $($_.Exception.Message)"
+        $Results = $Messages -join ' '
+        if ($Removal.Succeeded.Count -eq 0) {
+            throw $Results
         }
-
-        $Results = "Successfully removed $Label from $SiteUrl (all site groups and direct permissions)."
         Write-LogMessage -Headers $Headers -API $APIName -tenant $TenantFilter -message $Results -sev Info
         $StatusCode = [HttpStatusCode]::OK
     } catch {
         $ErrorMessage = Get-CippException -Exception $_
-        $Results = "Failed to remove $Label from $($SiteUrl): $($ErrorMessage.NormalizedError)"
+        $Results = "Failed to remove $Label from the selected site(s): $($ErrorMessage.NormalizedError)"
         Write-LogMessage -Headers $Headers -API $APIName -tenant $TenantFilter -message $Results -sev Error -LogData $ErrorMessage
         $StatusCode = [HttpStatusCode]::BadRequest
     }
