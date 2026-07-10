@@ -19,6 +19,13 @@ Function Invoke-ListSiteMembers {
     $TenantFilter = $Request.Query.tenantFilter
     $SiteId = $Request.Query.SiteId
     $SiteUrl = $Request.Query.SiteUrl
+    $Filter = $Request.Query.Filter
+
+    # A SharePoint user entity is a guest/external identity when either guest flag is set or
+    # the claims login carries the external-user or spo-guest marker.
+    function Test-SPGuestUser($User) {
+        [bool]$User.IsShareByEmailGuestUser -or [bool]$User.IsEmailAuthenticationGuestUser -or $User.LoginName -match '(?i)#ext#|urn%3aspo%3aguest'
+    }
 
     try {
         if (-not $SiteUrl) {
@@ -38,7 +45,7 @@ Function Invoke-ListSiteMembers {
                 'Visitors' = 'associatedvisitorgroup'
             }
             foreach ($Role in $RoleGroups.Keys) {
-                $Users = New-GraphGetRequest -uri "$BaseUri/web/$($RoleGroups[$Role])/users?`$select=Id,Title,Email,LoginName,PrincipalType" -tenantid $TenantFilter -scope $Scope -extraHeaders $JsonAccept -UseCertificate -AsApp $true
+                $Users = New-GraphGetRequest -uri "$BaseUri/web/$($RoleGroups[$Role])/users?`$select=Id,Title,Email,LoginName,PrincipalType,IsShareByEmailGuestUser,IsEmailAuthenticationGuestUser" -tenantid $TenantFilter -scope $Scope -extraHeaders $JsonAccept -UseCertificate -AsApp $true
                 foreach ($User in $Users) {
                     if ($User.LoginName -match 'federateddirectoryclaimprovider\|([0-9a-fA-F-]{36})(_o)?$') {
                         # Group-connected site: the role group holds the backing M365 group as
@@ -55,6 +62,7 @@ Function Invoke-ListSiteMembers {
                                         UserPrincipalName = $GroupMember.userPrincipalName
                                         Group             = $Role
                                         Type              = 'User (via M365 Group)'
+                                        IsGuest           = ($GroupMember.userPrincipalName -match '(?i)#ext#')
                                         IsSiteAdmin       = $false
                                     })
                             }
@@ -67,6 +75,7 @@ Function Invoke-ListSiteMembers {
                                     UserPrincipalName = $null
                                     Group             = $Role
                                     Type              = 'M365 Group'
+                                    IsGuest           = $false
                                     IsSiteAdmin       = $false
                                 })
                         }
@@ -84,6 +93,7 @@ Function Invoke-ListSiteMembers {
                                 UserPrincipalName = if ($User.PrincipalType -eq 1) { ($User.LoginName -split '\|')[-1] } else { $null }
                                 Group             = $Role
                                 Type              = $Type
+                                IsGuest           = (Test-SPGuestUser $User)
                                 IsSiteAdmin       = $false
                             })
                     }
@@ -92,7 +102,7 @@ Function Invoke-ListSiteMembers {
 
             # Site collection admins: flag them on existing rows, add rows for admins that
             # are not in any role group.
-            $Admins = New-GraphGetRequest -uri "$BaseUri/web/siteusers?`$filter=IsSiteAdmin eq true&`$select=Id,Title,Email,LoginName,PrincipalType" -tenantid $TenantFilter -scope $Scope -extraHeaders $JsonAccept -UseCertificate -AsApp $true
+            $Admins = New-GraphGetRequest -uri "$BaseUri/web/siteusers?`$filter=IsSiteAdmin eq true&`$select=Id,Title,Email,LoginName,PrincipalType,IsShareByEmailGuestUser,IsEmailAuthenticationGuestUser" -tenantid $TenantFilter -scope $Scope -extraHeaders $JsonAccept -UseCertificate -AsApp $true
             foreach ($Admin in $Admins) {
                 $Existing = @($Members | Where-Object { $_.LoginName -eq $Admin.LoginName })
                 if ($Existing.Count -gt 0) {
@@ -104,6 +114,7 @@ Function Invoke-ListSiteMembers {
                             LoginName         = $Admin.LoginName
                             UserPrincipalName = if ($Admin.PrincipalType -eq 1) { ($Admin.LoginName -split '\|')[-1] } else { $null }
                             Group             = 'Site Admins'
+                            IsGuest           = (Test-SPGuestUser $Admin)
                             Type              = if ($Admin.PrincipalType -eq 1) { 'User' } elseif ($Admin.LoginName -match 'federateddirectoryclaimprovider') { 'M365 Group' } else { 'Other' }
                             IsSiteAdmin       = $true
                         })
@@ -127,10 +138,15 @@ Function Invoke-ListSiteMembers {
                             UserPrincipalName = if ($Item.fields.UserName) { ($Item.fields.UserName -split '\|')[-1] } else { $null }
                             Group             = 'Site Users'
                             Type              = 'User'
+                            IsGuest           = ($Item.fields.UserName -match '(?i)#ext#')
                             IsSiteAdmin       = [bool]$Item.fields.IsSiteAdmin
                         })
                 }
             }
+        }
+
+        if ($Filter -eq 'External') {
+            $Members = @($Members | Where-Object { $_.IsGuest })
         }
 
         $StatusCode = [HttpStatusCode]::OK
