@@ -1552,6 +1552,16 @@ function Invoke-NinjaOneTenantSync {
 
         ### M365 Links Section
         if ($MappedFields.TenantLinks) {
+            try {
+                $SharePointAdminUrl = (Get-SharePointAdminLink -TenantFilter $TenantFilter).AdminUrl
+            } catch {
+                $SharePointTenantName = ($Customer.initialDomainName -split '\.')[0]
+                if ($SharePointTenantName) {
+                    Write-Information "NinjaOneSync: Get-SharePointAdminLink failed for $($Customer.defaultDomainName), using fallback SharePoint admin URL '$SharePointAdminUrl'. Error: $($_.Exception.Message)"
+                    $SharePointAdminUrl = "https://$SharePointTenantName-admin.sharepoint.com"
+                }
+            }
+
             $ManagementLinksData = @(
                 @{
                     Name = 'M365 Admin Portal'
@@ -1575,7 +1585,7 @@ function Invoke-NinjaOneTenantSync {
                 },
                 @{
                     Name = 'SharePoint Admin'
-                    Link = "https://admin.microsoft.com/Partner/beginclientsession.aspx?CTID=$($Customer.customerId)&CSDEST=SharePoint"
+                    Link = $SharePointAdminUrl ?? "https://$($Customer.defaultDomainName)-admin.sharepoint.com"
                     Icon = 'fas fa-shapes'
                 },
                 @{
