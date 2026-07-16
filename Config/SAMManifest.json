@@ -610,6 +610,14 @@
         {
           "id": "1ff1be21-34eb-448c-9ac9-ce1f506b2a68",
           "type": "Scope"
+        },
+        {
+          "id": "cc147c17-b8e8-4d3f-9f94-aa9e279a079a",
+          "type": "Role"
+        },
+        {
+          "id": "e2edbde8-4448-4e49-8ebb-d53ba72df0f3",
+          "type": "Scope"
         }
       ]
     },
