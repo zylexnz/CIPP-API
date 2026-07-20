@@ -1,55 +1,70 @@
 function Sync-CippContainerUpdateState {
     <#
     .SYNOPSIS
-    Reconcile the stored container update-check result with the build that is actually running.
+    Resolve container update settings and reconcile the stored check result with the running build.
 
     .DESCRIPTION
+    Returns the effective container update settings. Fields that have never been saved resolve
+    to the defaults: auto-restart enabled, check every hour, preferred time 23:00. Explicitly
+    saved values are respected — including CheckInterval '0' (disabled) and a CheckTime saved
+    as an empty string, which means "no preferred time"; only a missing field falls back to
+    the default. Both the Status endpoint and the update-check timer consume this, so the
+    defaults apply identically to both.
+
     The ContainerUpdateSettings table is only written when an update check runs, so after a
     restart that applied an update the table keeps reporting the previous build's state —
     "update available" with the old running version — until the next check. This compares the
     stored result against the running APP_VERSION/IMAGE_TAG and clears or recomputes the flag
-    locally, without a registry call. Returns the current settings entity, or $null when no
-    settings have been saved yet.
+    locally, without a registry call.
     #>
     [CmdletBinding()]
     param()
 
     $SettingsTable = Get-CippTable -tablename 'ContainerUpdateSettings'
     $Settings = Get-CIPPAzDataTableEntity @SettingsTable -Filter "PartitionKey eq 'Settings' and RowKey eq 'UpdateConfig'" | Select-Object -First 1
-    if (-not $Settings) { return $null }
+
+    # Effective schedule settings — defaults apply only to never-saved fields
+    $AutoUpdate = if ([string]::IsNullOrWhiteSpace([string]$Settings.AutoUpdate)) { 'true' } else { [string]$Settings.AutoUpdate }
+    $CheckInterval = if ([string]::IsNullOrWhiteSpace([string]$Settings.CheckInterval)) { '1h' } else { [string]$Settings.CheckInterval }
+    $CheckTime = if ($null -eq $Settings.CheckTime) { '23' } else { [string]$Settings.CheckTime }
 
     $RunningVersion = $env:APP_VERSION
     $StoredRunning = [string]($Settings.RunningVersion ?? '')
-    if (-not $RunningVersion -or -not $StoredRunning -or $StoredRunning -eq $RunningVersion) {
-        return $Settings
-    }
-
-    # The container restarted onto a different build since the last check.
     $StoredRemote = [string]($Settings.RemoteVersion ?? '')
     $CheckedTag = [string]($Settings.CheckedTag ?? '')
-    $RunningTag = $env:IMAGE_TAG
-    if ($CheckedTag -and $RunningTag -and $CheckedTag -ne $RunningTag) {
-        # The last check ran against a different channel tag — its result no longer applies.
-        $UpdateAvailable = $false
-    } else {
-        $UpdateAvailable = [bool]($StoredRemote -and $StoredRemote -ne $RunningVersion)
+    $UpdateAvailable = [string]($Settings.UpdateAvailable ?? 'false')
+
+    $NeedsWrite = $false
+    if ($Settings -and $RunningVersion -and $StoredRunning -and $StoredRunning -ne $RunningVersion) {
+        # The container restarted onto a different build since the last check.
+        $RunningTag = $env:IMAGE_TAG
+        if ($CheckedTag -and $RunningTag -and $CheckedTag -ne $RunningTag) {
+            # The last check ran against a different channel tag — its result no longer applies.
+            $UpdateAvailable = 'False'
+        } else {
+            $UpdateAvailable = [string][bool]($StoredRemote -and $StoredRemote -ne $RunningVersion)
+        }
+        Write-Information "Container update state reconciled: running build changed '$StoredRunning' -> '$RunningVersion', UpdateAvailable=$UpdateAvailable"
+        $StoredRunning = $RunningVersion
+        $NeedsWrite = $true
     }
 
     $Entity = @{
         PartitionKey    = 'Settings'
         RowKey          = 'UpdateConfig'
-        AutoUpdate      = [string]($Settings.AutoUpdate ?? 'false')
-        CheckInterval   = [string]($Settings.CheckInterval ?? '0')
-        CheckTime       = [string]($Settings.CheckTime ?? '')
+        AutoUpdate      = $AutoUpdate
+        CheckInterval   = $CheckInterval
+        CheckTime       = $CheckTime
         LastCheck       = [string]($Settings.LastCheck ?? '')
-        UpdateAvailable = [string]$UpdateAvailable
-        RunningVersion  = [string]$RunningVersion
+        UpdateAvailable = $UpdateAvailable
+        RunningVersion  = $StoredRunning
         RemoteVersion   = $StoredRemote
         RemoteDigest    = [string]($Settings.RemoteDigest ?? '')
         RemoteBuildDate = [string]($Settings.RemoteBuildDate ?? '')
         CheckedTag      = $CheckedTag
     }
-    Add-CIPPAzDataTableEntity @SettingsTable -Entity $Entity -Force | Out-Null
-    Write-Information "Container update state reconciled: running build changed '$StoredRunning' -> '$RunningVersion', UpdateAvailable=$UpdateAvailable"
+    if ($NeedsWrite) {
+        Add-CIPPAzDataTableEntity @SettingsTable -Entity $Entity -Force | Out-Null
+    }
     return [pscustomobject]$Entity
 }
