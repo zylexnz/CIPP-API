@@ -12,7 +12,10 @@ function Start-ContainerUpdateCheck {
 
     if ($PSCmdlet.ShouldProcess('Start-ContainerUpdateCheck', 'Check for container image updates')) {
         $SettingsTable = Get-CippTable -tablename 'ContainerUpdateSettings'
-        $Settings = Get-CIPPAzDataTableEntity @SettingsTable -Filter "PartitionKey eq 'Settings' and RowKey eq 'UpdateConfig'" | Select-Object -First 1
+        # Reconcile the stored check result with the running build first — a restart may
+        # have applied a previously detected update, and this must clear the stale
+        # "update available" flag even when checks are disabled or not yet due.
+        $Settings = Sync-CippContainerUpdateState
 
         if (-not $Settings -or $Settings.CheckInterval -eq '0' -or [string]::IsNullOrWhiteSpace($Settings.CheckInterval)) {
             Write-Information 'Container update check: disabled or not configured'
@@ -153,10 +156,12 @@ function Start-ContainerUpdateCheck {
             }
 
             $RemoteVersion = $manifest.annotations.'org.opencontainers.image.version'
-            if (-not $RemoteVersion -and $manifest.config.digest) {
+            $RemoteBuildDate = $manifest.annotations.'org.opencontainers.image.created'
+            if ((-not $RemoteVersion -or -not $RemoteBuildDate) -and $manifest.config.digest) {
                 try {
                     $config = Invoke-RestMethod -Uri "https://ghcr.io/v2/$imagePath/blobs/$($manifest.config.digest)" -Method GET -Headers $authHeader -ErrorAction Stop
-                    $RemoteVersion = $config.config.Labels.'org.opencontainers.image.version'
+                    if (-not $RemoteVersion) { $RemoteVersion = $config.config.Labels.'org.opencontainers.image.version' }
+                    if (-not $RemoteBuildDate) { $RemoteBuildDate = $config.config.Labels.'org.opencontainers.image.created' }
                 } catch {
                     Write-Information "Could not read image config labels: $($_.Exception.Message)"
                 }
@@ -179,6 +184,8 @@ function Start-ContainerUpdateCheck {
                 RunningVersion  = [string]($RunningVersion ?? '')
                 RemoteVersion   = [string]($RemoteVersion ?? '')
                 RemoteDigest    = [string]($RemoteDigest ?? '')
+                RemoteBuildDate = [string]($RemoteBuildDate ?? '')
+                CheckedTag      = [string]($CheckTag ?? '')
             }
             Add-CIPPAzDataTableEntity @SettingsTable -Entity $UpdateEntity -Force | Out-Null
 

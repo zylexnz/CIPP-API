@@ -68,10 +68,12 @@ function Invoke-ExecContainerManagement {
         }
 
         $version = $manifest.annotations.'org.opencontainers.image.version'
-        if (-not $version -and $manifest.config.digest) {
+        $created = $manifest.annotations.'org.opencontainers.image.created'
+        if ((-not $version -or -not $created) -and $manifest.config.digest) {
             try {
                 $config = Invoke-RestMethod -Uri "https://ghcr.io/v2/$imagePath/blobs/$($manifest.config.digest)" -Method GET -Headers $authHeader -ErrorAction Stop
-                $version = $config.config.Labels.'org.opencontainers.image.version'
+                if (-not $version) { $version = $config.config.Labels.'org.opencontainers.image.version' }
+                if (-not $created) { $created = $config.config.Labels.'org.opencontainers.image.created' }
             } catch {
                 Write-Information "Could not read image config labels for $($imagePath):$Tag — $($_.Exception.Message)"
             }
@@ -80,6 +82,7 @@ function Invoke-ExecContainerManagement {
         return [pscustomobject]@{
             Digest  = [string]$digest
             Version = [string]$version
+            Created = [string]$created
         }
     }
 
@@ -112,8 +115,10 @@ function Invoke-ExecContainerManagement {
                     }
                 }
 
-                # Read update settings and last check result
-                $Settings = Get-CIPPAzDataTableEntity @SettingsTable -Filter "PartitionKey eq 'Settings' and RowKey eq 'UpdateConfig'" | Select-Object -First 1
+                # Read update settings and last check result, reconciled against the running
+                # build — a restart may have applied the previously detected update, which
+                # would otherwise keep showing "update available" until the next check.
+                $Settings = Sync-CippContainerUpdateState
                 $UpdateInfo = @{
                     AutoUpdate      = $false
                     CheckInterval   = '0'
@@ -123,6 +128,7 @@ function Invoke-ExecContainerManagement {
                     RunningVersion  = $null
                     RemoteVersion   = $null
                     RemoteDigest    = $null
+                    RemoteBuildDate = $null
                 }
                 if ($Settings) {
                     $UpdateInfo.AutoUpdate = $Settings.AutoUpdate -eq 'true'
@@ -133,6 +139,7 @@ function Invoke-ExecContainerManagement {
                     $UpdateInfo.RunningVersion = $Settings.RunningVersion ?? $null
                     $UpdateInfo.RemoteVersion = $Settings.RemoteVersion ?? $null
                     $UpdateInfo.RemoteDigest = $Settings.RemoteDigest ?? $null
+                    $UpdateInfo.RemoteBuildDate = $Settings.RemoteBuildDate ?? $null
                 }
 
                 $Body = @{
@@ -140,6 +147,7 @@ function Invoke-ExecContainerManagement {
                         CurrentVersion    = $CurrentVersion
                         CommitSha         = $CommitSha
                         ImageTag          = $ImageTag
+                        BuildDate         = $env:BUILD_DATE ?? 'unknown'
                         CurrentChannel    = $CurrentChannel
                         ConfiguredChannel = $ConfiguredChannel
                         CurrentImage      = $CurrentImage
@@ -199,6 +207,7 @@ function Invoke-ExecContainerManagement {
                 $RemoteInfo = Get-GHCRImageInfo -ImageRef $CurrentImage -Tag $CheckTag
                 $RemoteVersion = $RemoteInfo.Version
                 $RemoteDigest = $RemoteInfo.Digest
+                $RemoteBuildDate = $RemoteInfo.Created
 
                 $RunningVersion = $env:APP_VERSION
                 $UpdateAvailable = $false
@@ -214,6 +223,8 @@ function Invoke-ExecContainerManagement {
                     RunningVersion  = [string]($RunningVersion ?? '')
                     RemoteVersion   = [string]($RemoteVersion ?? '')
                     RemoteDigest    = [string]($RemoteDigest ?? '')
+                    RemoteBuildDate = [string]($RemoteBuildDate ?? '')
+                    CheckedTag      = [string]($CheckTag ?? '')
                 }
                 $Existing = Get-CIPPAzDataTableEntity @SettingsTable -Filter "PartitionKey eq 'Settings' and RowKey eq 'UpdateConfig'" | Select-Object -First 1
                 if ($Existing) {
@@ -241,6 +252,7 @@ function Invoke-ExecContainerManagement {
                         RunningVersion  = $RunningVersion
                         RemoteVersion   = $RemoteVersion
                         RemoteDigest    = $RemoteDigest
+                        RemoteBuildDate = $RemoteBuildDate
                         CheckedTag      = $CheckTag
                     }
                 }
@@ -266,7 +278,8 @@ function Invoke-ExecContainerManagement {
                     throw "Invalid check time: $CheckTime. Must be 0-23 (UTC hour)."
                 }
 
-                # Read existing settings to preserve check results
+                # Read existing settings to preserve check results — the upsert replaces the
+                # whole entity, so every check-result field must be carried over here.
                 $Existing = Get-CIPPAzDataTableEntity @SettingsTable -Filter "PartitionKey eq 'Settings' and RowKey eq 'UpdateConfig'" | Select-Object -First 1
                 $Entity = @{
                     PartitionKey    = 'Settings'
@@ -276,8 +289,11 @@ function Invoke-ExecContainerManagement {
                     CheckTime       = [string]($CheckTime ?? '')
                     LastCheck       = [string]($Existing.LastCheck ?? '')
                     UpdateAvailable = [string]($Existing.UpdateAvailable ?? 'false')
-                    RunningDigest   = [string]($Existing.RunningDigest ?? '')
+                    RunningVersion  = [string]($Existing.RunningVersion ?? '')
+                    RemoteVersion   = [string]($Existing.RemoteVersion ?? '')
                     RemoteDigest    = [string]($Existing.RemoteDigest ?? '')
+                    RemoteBuildDate = [string]($Existing.RemoteBuildDate ?? '')
+                    CheckedTag      = [string]($Existing.CheckedTag ?? '')
                 }
                 Add-CIPPAzDataTableEntity @SettingsTable -Entity $Entity -Force | Out-Null
 
