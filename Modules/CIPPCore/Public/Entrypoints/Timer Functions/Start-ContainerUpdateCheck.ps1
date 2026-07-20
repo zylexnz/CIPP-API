@@ -14,11 +14,13 @@ function Start-ContainerUpdateCheck {
         $SettingsTable = Get-CippTable -tablename 'ContainerUpdateSettings'
         # Reconcile the stored check result with the running build first — a restart may
         # have applied a previously detected update, and this must clear the stale
-        # "update available" flag even when checks are disabled or not yet due.
+        # "update available" flag even when checks are disabled or not yet due. Sync also
+        # resolves defaults for never-saved fields (auto-restart on, hourly, 23:00), so
+        # only an explicitly saved interval of '0' disables checking.
         $Settings = Sync-CippContainerUpdateState
 
-        if (-not $Settings -or $Settings.CheckInterval -eq '0' -or [string]::IsNullOrWhiteSpace($Settings.CheckInterval)) {
-            Write-Information 'Container update check: disabled or not configured'
+        if (-not $Settings -or $Settings.CheckInterval -eq '0') {
+            Write-Information 'Container update check: disabled'
             return
         }
 
@@ -167,11 +169,6 @@ function Start-ContainerUpdateCheck {
                 }
             }
 
-            if ($RemoteBuildDate -is [datetime]) {
-                if ($RemoteBuildDate.Kind -eq [System.DateTimeKind]::Unspecified) { $RemoteBuildDate = [DateTime]::SpecifyKind($RemoteBuildDate, [System.DateTimeKind]::Utc) }
-                $RemoteBuildDate = $RemoteBuildDate.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
-            }
-
             $RunningVersion = $env:APP_VERSION
             $UpdateAvailable = $false
             if ($RemoteVersion -and $RunningVersion -and $RemoteVersion -ne $RunningVersion) {
@@ -181,9 +178,9 @@ function Start-ContainerUpdateCheck {
             $UpdateEntity = @{
                 PartitionKey    = 'Settings'
                 RowKey          = 'UpdateConfig'
-                AutoUpdate      = [string]($Settings.AutoUpdate ?? 'false')
-                CheckInterval   = [string]($Settings.CheckInterval ?? '0')
-                CheckTime       = [string]($Settings.CheckTime ?? '')
+                AutoUpdate      = [string]($Settings.AutoUpdate ?? 'true')
+                CheckInterval   = [string]($Settings.CheckInterval ?? '1h')
+                CheckTime       = [string]($Settings.CheckTime ?? '23')
                 LastCheck       = [string][int64](([DateTimeOffset]::UtcNow).ToUnixTimeSeconds())
                 UpdateAvailable = [string]$UpdateAvailable
                 RunningVersion  = [string]($RunningVersion ?? '')
