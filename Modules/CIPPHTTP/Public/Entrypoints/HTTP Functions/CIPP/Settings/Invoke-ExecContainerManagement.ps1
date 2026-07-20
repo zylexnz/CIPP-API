@@ -79,6 +79,11 @@ function Invoke-ExecContainerManagement {
             }
         }
 
+        if ($created -is [datetime]) {
+            if ($created.Kind -eq [System.DateTimeKind]::Unspecified) { $created = [DateTime]::SpecifyKind($created, [System.DateTimeKind]::Utc) }
+            $created = $created.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+        }
+
         return [pscustomobject]@{
             Digest  = [string]$digest
             Version = [string]$version

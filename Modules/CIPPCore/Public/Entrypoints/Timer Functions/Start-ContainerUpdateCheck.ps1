@@ -167,6 +167,11 @@ function Start-ContainerUpdateCheck {
                 }
             }
 
+            if ($RemoteBuildDate -is [datetime]) {
+                if ($RemoteBuildDate.Kind -eq [System.DateTimeKind]::Unspecified) { $RemoteBuildDate = [DateTime]::SpecifyKind($RemoteBuildDate, [System.DateTimeKind]::Utc) }
+                $RemoteBuildDate = $RemoteBuildDate.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+            }
+
             $RunningVersion = $env:APP_VERSION
             $UpdateAvailable = $false
             if ($RemoteVersion -and $RunningVersion -and $RemoteVersion -ne $RunningVersion) {
